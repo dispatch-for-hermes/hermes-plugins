@@ -93,7 +93,7 @@ def _opaque(value: str) -> bool:
 
 
 def _reference(value: str) -> bool:
-    return bool(re.match(r"(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?\Z|\$\(|\$\{\{|process\.env\.|os\.(?:getenv|environ))", value))
+    return bool(re.match(r"(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?\Z|\$\(|\$\{\{|process\.env\.|os\.(?:environ|getenv))", value))
 
 
 def _file_path(value: str) -> bool:

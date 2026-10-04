@@ -12,25 +12,19 @@ Without this plugin, Dispatch can only alert you while it's open, or for about 2
 
 ### Install
 
-On the computer that runs your Hermes gateway:
+The easy way: open Dispatch. When your gateway doesn't have this plugin, Dispatch offers to have your Hermes bot
+install it. Tap **Ask**, and the bot installs it, restarts Hermes, and Dispatch turns notifications on.
+
+To do it yourself, on the computer that runs your Hermes gateway:
 
 ```bash
-hermes plugins install dispatch-for-hermes/hermes-plugins/dispatch-push
+hermes plugins install dispatch-for-hermes/hermes-plugins/dispatch-push --enable
 ```
 
-```bash
-hermes plugins enable dispatch-push
-```
+Then restart `hermes serve` or `hermes dashboard` (or the Hermes app). The plugin's routes appear only after a restart.
+Open Dispatch and make sure **Settings › Notifications** is on. Dispatch registers for push the next time it opens.
 
-Then restart `hermes serve` (or the Hermes app). The plugin's routes appear only after a restart. Open Dispatch and
-make sure **Settings › Notifications** is on. The next time Dispatch signs in to your gateway, it registers for push.
-
-Or ask your Hermes bot to do it: *"Install the Dispatch push plugin: `hermes plugins install dispatch-for-hermes/hermes-plugins/dispatch-push`,
-enable it, then tell me to restart hermes serve."*
-
-Hermes calls this a custom, unreviewed source when you install it. Its security scan may point out the one `curl` call
-in `push.py`. That call is used only by the app's developer, who sends to Apple directly. Everyone else goes through the
-relay described below.
+To update an older copy, run the same install command with `--force` added. Your registered devices are kept.
 
 ### What it sends, and who can read it
 
