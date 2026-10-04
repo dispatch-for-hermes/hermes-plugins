@@ -1,0 +1,153 @@
+{
+ "about": "Fixed seal vectors: gateway-plugin/dispatch-push/test_push.py seals them byte for byte and the app's DispatchSeal opens them (scripts/native-platform). Key = bytes 0..31, nonce = bytes 100..111; real alerts use a random nonce per push.",
+ "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+ "kid": "630dcd2966c43366",
+ "aad": "dispatch-push seal v1",
+ "cases": [
+  {
+   "name": "turnDone",
+   "outer": {
+    "aps": {
+     "alert": {
+      "title": "Dispatch",
+      "body": "New notification"
+     },
+     "mutable-content": 1,
+     "sound": "default",
+     "interruption-level": "active",
+     "relevance-score": 0.6
+    },
+    "seal": {
+     "v": 1,
+     "kid": "630dcd2966c43366",
+     "box": "ZGVmZ2hpamtsbW5vMzm/FgrLbOUcAzONqBFIxzngcmP/AJZQnfP/KZaBiWr2hiS5bii5UJWWWFOcN6Ssc3voi0EkYUGJ0d6zjuXcpCjPumgV4hvnE/rNoZEeEYgBAGsU1LHotqzRX6oIeio0oFPvUkk+1wvdnvz/gGndjkNe7GvjVZtd3A32w6jBeLNb8PaFBVc0TqVrbCfo4yjr4KLfanI54/5U5x8jg3SIifNeVTmy5tHOXXSDg4QGxq/y3KTNFYlw/UgzJ3nysCyR+x8335glK2AgTlkAIRiPJGIs/3H3OXjemjo4r86OeIUqBZjZ1vBZUF7DMrSKeaKiNaV0wpyqz/HlwipZFA/Kq0Qsu7BMHKTm4mm0tcrFejKEqT1YylkZCbxhfHAcGylR/9Z0CBsKyIYUumy+kMewzWJ0ONkvYyu9eekIfLO1DxnGN4iUeDh3iue9YAX8HwJA1NhtWeBnjujSsM7jTIaocL/hta4OcV2d0qHQgHh4lNN2B5/7HjHS+8l02BpBEns="
+    }
+   },
+   "inner": {
+    "aps": {
+     "alert": {
+      "title": "Sam",
+      "body": "The launch plan is ready. Café ☕ — next steps inside."
+     },
+     "sound": "default",
+     "interruption-level": "active",
+     "relevance-score": 0.6,
+     "thread-id": "20261003_101500_ab12cd"
+    },
+    "dispatch": {
+     "kind": "turnDone",
+     "session": "20261003_101500_ab12cd",
+     "profile": "sam",
+     "account": "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0de"
+    }
+   }
+  },
+  {
+   "name": "approval",
+   "outer": {
+    "aps": {
+     "alert": {
+      "title": "Dispatch",
+      "body": "New notification"
+     },
+     "mutable-content": 1,
+     "sound": "default",
+     "interruption-level": "active",
+     "relevance-score": 1.0,
+     "category": "DISPATCH_APPROVAL"
+    },
+    "seal": {
+     "v": 1,
+     "kid": "630dcd2966c43366",
+     "box": "ZGVmZ2hpamtsbW5vMzm/FgrLbOUcAzONqBFIxzngcmP/AJZQnfP/KZaBiWr2hiS5bii5U5ydDEzdNqXvaS723QAkMUXag9m4z+XA+mTjoiyrZxl25BqDJzOwE4IBHn5By7Gv6v2YWLAeYTwk/gX7EQVg1BvFn7LnmC/Zi1ZC9nrjVZtG1xX2x7vaa6If7PvHG1dgEfhnZimr9DTw86aZazkvpKgTo05/1iCVyqNuFmyh6dHQNDnDxt4Xx+y6067IQ9Y1oAp4M3LgxFadmm5SqeBKNVESLSQ1BHbQdWxq8mv0KG3JkXAg7pfHeoIgQ4DBgORbTmjDKrDEd6zzI7N02Jqrg+n90ihbEAjLq0dA1bFNGKHmjVe35smUfXSKp29YwE4FAKo3ZGhNCCECjMAnSVRHzo0T6z/znbyz0iUreYguYCCsILQPc7jqCEzTOpmeazJ1gbjpIRm4DQhO0oYpBadki77SsM3gSdCocLzisPgOcV6e1/fSgzxjjx5gr8Ix+aCJ0WBxmd5erISNG3kpLNL1plT1pBbzPbrc87BaYGu3WLTd2SpXC4ByWxNMIBIdnwfQBOAp84fqbopcTKp+p8EAHIJhzfbqFgiLY1Y7OXrSOiYeWLqTMTpBeXPLMquIORfcbDgvTCKujJj0XT+NJGZJjc7BA9Xz77GsQwPe+3POYevBmFxJxJAcrrf6I47vXA=="
+    }
+   },
+   "inner": {
+    "aps": {
+     "alert": {
+      "title": "Sam",
+      "body": "Wants to run: npm run deploy"
+     },
+     "sound": "default",
+     "interruption-level": "active",
+     "relevance-score": 1.0,
+     "thread-id": "20261003_101500_ab12cd",
+     "category": "DISPATCH_APPROVAL"
+    },
+    "dispatch": {
+     "kind": "approval",
+     "session": "20261003_101500_ab12cd",
+     "request": "req_42",
+     "sessionKey": "agent:main:desktop:dm:1",
+     "token": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+     "profile": "sam",
+     "account": "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0de"
+    }
+   }
+  },
+  {
+   "name": "who-only",
+   "outer": {
+    "aps": {
+     "alert": {
+      "title": "Dispatch",
+      "body": "New notification"
+     },
+     "mutable-content": 1,
+     "sound": "default",
+     "interruption-level": "active",
+     "relevance-score": 0.6
+    },
+    "seal": {
+     "v": 1,
+     "kid": "630dcd2966c43366",
+     "box": "ZGVmZ2hpamtsbW5vMzm/FgrLbOUcAzONqBFIxzngZGXvFdFIhZ/JP9vRwDj4kGCmPn32JK6SFR2Abui8dC72gwJwY0yfl82jg/WHpirltXqzOUlw+xuELH+nXYMSHXMWnefspauYQKFZP2wj6x33CAoj2xueib2q0Gia0hIFtjPjDdFG1xj3nLPQKv0QraiaXwNyG/oWZzW4tWyyyaafd2Io4rBMvVwpiWLVm+RST36qp8OLAjbF1dZW17vkn4nGWdZw41pydDux6XCg6BUk2JgnQjByT1g8dArDPXB4yWPlaT7eljou9pyXfo0nS8fZmKdYX3eOcPPJNuO+Jbhzicnmjvuhln8OQQ6c/RIW6bAbT/Gz3jiw4p3DfSDO7ShPxg8WA7wmJWIJHCEWsMRzDR0A3tgG/jP5kMewzWJ0ONktYGylZ+0a/OXhglDEBJtGCnEzEYI="
+    }
+   },
+   "inner": {
+    "aps": {
+     "alert": {
+      "body": "New reply from Sam"
+     },
+     "sound": "default",
+     "interruption-level": "active",
+     "relevance-score": 0.6,
+     "thread-id": "20261003_101500_ab12cd"
+    },
+    "dispatch": {
+     "kind": "turnDone",
+     "session": "20261003_101500_ab12cd",
+     "profile": "sam",
+     "account": "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0de"
+    }
+   }
+  },
+  {
+   "name": "settled",
+   "outer": {
+    "aps": {
+     "content-available": 1
+    },
+    "seal": {
+     "v": 1,
+     "kid": "630dcd2966c43366",
+     "box": "ZGVmZ2hpamtsbW5vMzm/FgrLbOUcATCGrgAEiW+jcGviAJIQy7SOcsreiWrwgDOwLWb4bN/JAx2WK6SrOWG6hlA6M0eMkMD0w6PW73v/smG4aQEnuV/fdSC6AdU7SS8FkvW9mb6TB/YYd2x9rAP3Dx4oywqRwPy3x3zn3BAJrD2yHMpH2xb9+r/NKv0Q/v/NB0Z4RqggOD/t5S/p4qiNfDQmvKMTvVw9kn7Dk/xUBWayr4CNSXSDlo8XzLv4he+TFdBiqR5kdCvy5nmrr0w2jM5wEWJyGQ0GIFnCbiYt82G3PmrYl3sysoqAdIh+QcSex+YbWHzJObKYM+a0NbU3z5bmwem0lW4fTlueuU0H+PUYVOnbqZd58yYdwtM5RLa0c11M"
+    }
+   },
+   "inner": {
+    "aps": {
+     "content-available": 1
+    },
+    "dispatch": {
+     "kind": "approval",
+     "session": "20261003_101500_ab12cd",
+     "request": "req_42",
+     "sessionKey": "agent:main:desktop:dm:1",
+     "profile": "sam",
+     "account": "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0de",
+     "settled": true
+    }
+   }
+  }
+ ]
+}

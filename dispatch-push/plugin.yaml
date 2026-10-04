@@ -1,0 +1,20 @@
+name: dispatch-push
+version: "0.2.0"
+manifest_version: 2
+kind: standalone
+description: "Apple push notifications for the Dispatch iPhone app: finished turns (who replied and what they said) and approvals (the command), with Approve/Deny from the lock screen."
+author: Dispatch
+provides_tools: []
+provides_hooks: [post_llm_call, on_session_end, pre_approval_request, post_approval_response]
+optional_env:
+  - name: DISPATCH_APNS_KEY_PATH
+    description: "Direct mode: path to the app's APNs auth key (.p8). Only the app's developer has this."
+  - name: DISPATCH_APNS_KEY_ID
+    description: "Direct mode: the APNs key's Key ID"
+  - name: DISPATCH_APNS_TEAM_ID
+    description: "Direct mode: the Apple Developer Team ID that owns the app"
+  - name: DISPATCH_PUSH_RELAY_URL
+    description: "Another push relay's HTTPS URL, or `off` to send nothing. Unset, alerts go through the public Dispatch relay, sealed so it can't read them."
+  - name: DISPATCH_PUSH_RELAY_KEY
+    description: "Only for a private relay that asks for a key"
+    password: true
