@@ -1,5 +1,5 @@
 name: dispatch-push
-version: "0.2.0"
+version: "0.2.1"
 manifest_version: 2
 kind: standalone
 description: "Apple push notifications for the Dispatch iPhone app: finished turns (who replied and what they said) and approvals (the command), with Approve/Deny from the lock screen."

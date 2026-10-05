@@ -2,7 +2,7 @@
   "name": "dispatch-push",
   "label": "Dispatch push",
   "description": "Device registration and notification actions for the Dispatch iPhone app",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "icon": "Smartphone",
   "tab": {"hidden": true},
   "api": "plugin_api.py"

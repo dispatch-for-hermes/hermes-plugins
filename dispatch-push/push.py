@@ -307,10 +307,21 @@ def unseal(outer: dict, key: bytes) -> dict:
     return json.loads(AESGCM(key).decrypt(box[:12], box[12:], SEAL_AAD))
 
 
-def turn_push(kwargs: dict, profile: str, sender: str = "", text: str = "") -> Push | None:
+# A scheduled job that delivers to a bot's chat (cron `deliver: bot-chat`) posts its result there as one turn of a
+# `hermes chat -Q` child, a CLI turn this plugin would otherwise skip. Hermes names that child's query file
+# hermes-cron-botchat-* and hands it the turn report path beside it in this variable.
+BOT_CHAT_REPORT_ENV = "HERMES_QUIET_TURN_REPORT_FILE"
+
+
+def bot_chat_delivery(environ=None) -> bool:
+    """Is this process a scheduled job's delivery into a bot's chat? Its turns alert like the app's."""
+    return Path((os.environ if environ is None else environ).get(BOT_CHAT_REPORT_ENV, "")).name.startswith("hermes-cron-botchat-")
+
+
+def turn_push(kwargs: dict, profile: str, sender: str = "", text: str = "", delivery: bool = False) -> Push | None:
     """``on_session_end`` fires once per turn; a teardown repeat carries interrupted=True. ``text`` is the
-    reply ``post_llm_call`` saw for the turn."""
-    if kwargs.get("platform") not in APP_PLATFORMS:
+    reply ``post_llm_call`` saw for the turn. `delivery`: a scheduled job's turn in a bot's chat, whatever its platform."""
+    if kwargs.get("platform") not in APP_PLATFORMS and not delivery:
         return None
     if not kwargs.get("completed") or kwargs.get("interrupted") or not kwargs.get("session_id"):
         return None

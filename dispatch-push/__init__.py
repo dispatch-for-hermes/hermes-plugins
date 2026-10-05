@@ -2,7 +2,7 @@
 
 Hooks run wherever an agent turn runs; they only enqueue. App sessions (platform desktop/tui) live in
 ``hermes serve``, which also mounts ``dashboard/plugin_api.py``, so an approval pushed from here can be
-answered from the lock screen through that route. Messaging-platform sessions are ignored.
+answered from the lock screen through that route. Messaging-platform sessions are ignored; a scheduled job's delivery into a bot's chat alerts like an app turn.
 """
 import importlib.util
 import logging
@@ -56,7 +56,7 @@ def _serves_app_sessions() -> bool:
 def post_llm_call(**kwargs):
     try:
         session = str(kwargs.get("session_id") or "")
-        if session and kwargs.get("platform") in push.APP_PLATFORMS:
+        if session and (kwargs.get("platform") in push.APP_PLATFORMS or push.bot_chat_delivery()):
             _replies[session] = str(kwargs.get("assistant_response") or "")[:4000]
             if len(_replies) > 64:
                 _replies.pop(next(iter(_replies)))
@@ -68,7 +68,13 @@ def on_session_end(**kwargs):
     try:
         profile = _profile()
         text = _replies.pop(str(kwargs.get("session_id") or ""), "")
-        _dispatcher_for().submit(push.turn_push(kwargs, profile, _sender(profile), text))
+        delivery = push.bot_chat_delivery()
+        item = push.turn_push(kwargs, profile, _sender(profile), text, delivery=delivery)
+        if delivery and item is not None:
+            # A delivery child exits right after its one turn, before a daemon thread could send: send it now.
+            _dispatcher_for().deliver(item)
+        else:
+            _dispatcher_for().submit(item)
     except Exception:
         log.debug("dispatch-push turn hook failed", exc_info=True)
 
