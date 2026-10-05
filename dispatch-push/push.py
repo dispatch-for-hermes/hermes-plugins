@@ -172,9 +172,10 @@ def remove_device(root: Path, device_id: str) -> dict:
 
 
 def status_body(root: Path, sender) -> dict:
-    """`seal`: registrations may carry a seal key (the app sends one only when this says so)."""
-    return {"ok": True, "version": 2, "delivery": type(sender).__name__ if sender else None,
-            "kinds": list(KINDS), "seal": SEALS, "devices": len(Store(root / "devices.db").devices())}
+    """`seal`: registrations may carry a seal key (the app sends one only when this says so). `replies: "watcher"`
+    (0.3): reply alerts cover every bot, scheduled jobs included (ReplyWatcher); the app offers an update without it."""
+    return {"ok": True, "version": 3, "delivery": type(sender).__name__ if sender else None,
+            "kinds": list(KINDS), "seal": SEALS, "replies": "watcher", "devices": len(Store(root / "devices.db").devices())}
 
 
 def answer_approval(root: Path, request_id: str, session_key: str, choice: str,
