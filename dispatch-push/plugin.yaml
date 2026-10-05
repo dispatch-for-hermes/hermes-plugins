@@ -1,11 +1,11 @@
 name: dispatch-push
-version: "0.2.1"
+version: "0.3.0"
 manifest_version: 2
 kind: standalone
 description: "Apple push notifications for the Dispatch iPhone app: finished turns (who replied and what they said) and approvals (the command), with Approve/Deny from the lock screen."
 author: Dispatch
 provides_tools: []
-provides_hooks: [post_llm_call, on_session_end, pre_approval_request, post_approval_response]
+provides_hooks: [pre_approval_request, post_approval_response]
 optional_env:
   - name: DISPATCH_APNS_KEY_PATH
     description: "Direct mode: path to the app's APNs auth key (.p8). Only the app's developer has this."

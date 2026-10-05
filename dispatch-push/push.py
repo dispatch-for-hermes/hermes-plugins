@@ -307,21 +307,10 @@ def unseal(outer: dict, key: bytes) -> dict:
     return json.loads(AESGCM(key).decrypt(box[:12], box[12:], SEAL_AAD))
 
 
-# A scheduled job that delivers to a bot's chat (cron `deliver: bot-chat`) posts its result there as one turn of a
-# `hermes chat -Q` child, a CLI turn this plugin would otherwise skip. Hermes names that child's query file
-# hermes-cron-botchat-* and hands it the turn report path beside it in this variable.
-BOT_CHAT_REPORT_ENV = "HERMES_QUIET_TURN_REPORT_FILE"
-
-
-def bot_chat_delivery(environ=None) -> bool:
-    """Is this process a scheduled job's delivery into a bot's chat? Its turns alert like the app's."""
-    return Path((os.environ if environ is None else environ).get(BOT_CHAT_REPORT_ENV, "")).name.startswith("hermes-cron-botchat-")
-
-
-def turn_push(kwargs: dict, profile: str, sender: str = "", text: str = "", delivery: bool = False) -> Push | None:
+def turn_push(kwargs: dict, profile: str, sender: str = "", text: str = "") -> Push | None:
     """``on_session_end`` fires once per turn; a teardown repeat carries interrupted=True. ``text`` is the
-    reply ``post_llm_call`` saw for the turn. `delivery`: a scheduled job's turn in a bot's chat, whatever its platform."""
-    if kwargs.get("platform") not in APP_PLATFORMS and not delivery:
+    reply ``post_llm_call`` saw for the turn. (Reply alerts now come from ReplyWatcher; kept for its tests' rules.)"""
+    if kwargs.get("platform") not in APP_PLATFORMS:
         return None
     if not kwargs.get("completed") or kwargs.get("interrupted") or not kwargs.get("session_id"):
         return None
@@ -463,6 +452,103 @@ def sender_from_env() -> DirectAPNs | Relay | None:
     except ValueError:
         log.warning("dispatch-push relay URL must use HTTPS with a host and no user info")
         return None
+
+
+def profile_sender(profile: str) -> str:
+    """The bot's name as the Bots roster shows it: its Bot Mode title, the profile's display name, or its id
+    in words. Read-only profile.yaml metadata through Hermes' own helper."""
+    try:
+        from hermes_cli.profiles import get_profile_dir, read_profile_meta
+        meta = read_profile_meta(get_profile_dir(profile))
+        return meta.get("bot_title") or meta.get("display_name") or alert_copy.readable_profile(profile)
+    except Exception:
+        return alert_copy.readable_profile(profile)
+
+
+# A finished reply: the turn's last assistant message, in a chat people have with a bot in an app (Dispatch, the
+# desktop app, the TUI), never a subagent's working session (Hermes marks those `_delegate_from`), a cron job's own
+# run, a tool session or a messaging platform's chat.
+_REPLIES_SQL = """SELECT m.id, m.session_id, m.content FROM messages m JOIN sessions s ON s.id = m.session_id
+  WHERE m.id > ? AND m.role = 'assistant' AND m.finish_reason = 'stop' AND COALESCE(m.content, '') != ''
+    AND s.source IN ('desktop', 'tui') AND json_extract(s.model_config, '$._delegate_from') IS NULL
+  ORDER BY m.id"""
+
+
+class ReplyWatcher:
+    """Reply alerts for every bot from one place. A hook runs only in processes whose profile loaded this plugin, and
+    Hermes loads plugins per profile, so a bot's scheduled job (a `hermes chat -Q` child in its own profile posting
+    to its Bot Chat) or any turn outside `hermes serve` would never alert. Every reply ends up in its profile's
+    state.db, so the one process that has the plugin (the server Dispatch talks to) reads them all, read-only.
+    Starts at each database's newest message: nothing from before it started alerts."""
+
+    def __init__(self, root: Path, submit: Callable[[Push], None], sender: Callable[[str], str] = profile_sender):
+        self.root, self.submit, self.sender = Path(root), submit, sender
+        self.seen: dict[Path, int] = {}
+
+    def databases(self) -> list[tuple[str, Path]]:
+        found = [("default", self.root / "state.db")]
+        profiles = self.root / "profiles"
+        if profiles.is_dir():
+            found += [(home.name, home / "state.db") for home in sorted(profiles.iterdir()) if home.is_dir()]
+        return [(name, path) for name, path in found if path.is_file()]
+
+    def poll(self) -> int:
+        """One pass over every profile; returns how many replies it alerted."""
+        sent = 0
+        for profile, path in self.databases():
+            try:
+                with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2) as db:
+                    newest = db.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
+                    if path not in self.seen:
+                        self.seen[path] = newest
+                        continue
+                    rows = db.execute(_REPLIES_SQL, (self.seen[path],)).fetchall() if newest > self.seen[path] else []
+                    self.seen[path] = max(self.seen[path], newest)
+            except sqlite3.Error:
+                continue  # busy, or not a Hermes database yet: next pass
+            last: dict[str, str] = {}
+            for _, session, content in rows:
+                last[session] = content  # a burst of turns in one chat: its last reply
+            for session, content in last.items():
+                self.submit(Push("turnDone", session=session, profile=profile, sender=self.sender(profile), text=str(content)[:4000]))
+                sent += 1
+        return sent
+
+    def run(self, interval: float = 4.0, stop: threading.Event | None = None) -> None:
+        stop = stop or threading.Event()
+        while not stop.is_set():
+            try:
+                self.poll()
+            except Exception:
+                log.debug("dispatch-push reply watcher pass failed", exc_info=True)
+            stop.wait(interval)
+
+
+_watcher_started = False
+
+
+def start_reply_watcher(root: Path | None = None) -> bool:
+    """In the server Dispatch talks to (dashboard/plugin_api.py). One watcher per machine: a lock file, released
+    when its process exits, keeps a second server from alerting twice."""
+    global _watcher_started
+    if _watcher_started:
+        return False
+    try:
+        if root is None:
+            from hermes_constants import get_default_hermes_root  # outside Hermes (the plugin's tests): no watcher
+            root = get_default_hermes_root()
+        import fcntl
+        lock = open(data_dir() / "reply-watcher.lock", "w")
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, ImportError):
+        return False
+    _watcher_started = True
+    dispatcher = Dispatcher(Store(data_dir() / "devices.db"))
+    watcher = ReplyWatcher(root, dispatcher.submit)
+    thread = threading.Thread(target=watcher.run, name="dispatch-push-replies", daemon=True)
+    thread._dispatch_lock = lock  # held for the process's life
+    thread.start()
+    return True
 
 
 class Dispatcher:

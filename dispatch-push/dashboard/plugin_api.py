@@ -16,6 +16,8 @@ else:
     _spec.loader.exec_module(push)
 
 router = APIRouter()
+# Reply alerts for every bot, from this server (push.ReplyWatcher).
+push.start_reply_watcher()
 
 
 class DeviceIn(BaseModel):
