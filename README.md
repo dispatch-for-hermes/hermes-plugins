@@ -95,7 +95,8 @@ Hermes's own browser for each bot (its Chromium, or the Browser Use harness driv
 or a remote debugging address.
 
 Hermes closes its own headless browser when the bot's turn ends. A bot connected to a Chrome of its own keeps that
-browser, and its sign-ins, between turns, so you can watch it or take it over at any time.
+browser, and its sign-ins, between turns. Dispatch lists it whenever it's running, so you can open it, take it over
+and sign in to sites before the bot needs them.
 
 ### How it works
 

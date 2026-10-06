@@ -108,6 +108,13 @@ def live(record: dict, now: float | None = None) -> bool:
             and now - float(record.get("seen_at") or 0) < HEARTBEAT_STALE)
 
 
+def standing_id(profile: str, url: str) -> str:
+    """The id of a bot's standing browser: the Chrome its config connects it to (``browser.cdp_url``), listed by the
+    dashboard even before the bot uses it. The agent side computes the same id to honor a person's claim on it."""
+    import hashlib
+    return hashlib.sha256(f"standing\0{profile}\0{url}".encode()).hexdigest()[:24]
+
+
 def control(ident: str, base: Path | None = None, now: float | None = None) -> dict | None:
     """The person's current claim on a browser, or None when nobody has asked or the claim lapsed."""
     now = time.time() if now is None else now

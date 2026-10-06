@@ -18,7 +18,9 @@ browser tool Hermes gives them; this plugin adds one, `browser_ask_user`, and ov
 Hermes closes its own headless browser when the bot's turn ends, so there is nothing to take over after a bot
 has finished; `browser_ask_user` is how a bot keeps its browser open for the person. A bot connected to a
 Chrome of its own with `/browser connect` (`browser.cdp_url`, Hermes' `chrome-debug` profile) keeps that
-browser, and its sign-ins, between turns: it can be watched and taken over at any time.
+browser, and its sign-ins, between turns: the dashboard lists it from the bot's `browser.cdp_url` while its port
+answers, even before the bot has used it, so the person can open it and sign in to sites ahead of time. A claim on
+that listing holds back every process that bot runs in (they check the same standing id).
 
 `browser.use_real_profile` copies the person's everyday Chrome profile for the bot. Hermes can't copy it while
 that Chrome is open ("profile locked"), so on a Mac where Chrome is always running, `/browser connect` is the

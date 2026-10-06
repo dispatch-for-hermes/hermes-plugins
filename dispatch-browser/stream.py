@@ -30,7 +30,8 @@ import time
 PROTOCOL = 3
 IN_FLIGHT = 2
 PING_EVERY = 10.0
-CLAIM_SECONDS = 120.0   # a held browser stays held this long after its viewer drops (switching apps for a code)
+CLAIM_SECONDS = 120.0
+GRACE = 2.0              # a request waits at least this long for the bots' pause promises (agents publish each second)   # a held browser stays held this long after its viewer drops (switching apps for a code)
 RENEW_EVERY = 5.0
 # (longest side cap, JPEG quality), slow to sharp
 LEVELS = ((960, 50), (1280, 60), (1600, 70), (1920, 80))
@@ -52,9 +53,10 @@ def public(record: dict) -> dict:
 class Viewer:
     """One phone watching one browser."""
 
-    def __init__(self, spool, cdp, record: dict, send_text, siblings=None):
+    def __init__(self, spool, cdp, record: dict, send_text, siblings=None, refresh=None):
         self.spool, self.cdp_module, self.record = spool, cdp, record
         self.send_text = send_text
+        self.refresh = refresh or (lambda: None)  # keeps the dashboard's own (standing) records current
         self.siblings = siblings or (lambda record: [record["id"]])  # every published copy of this browser
         self.viewer_id = None
         self.cdp = None
@@ -141,8 +143,9 @@ class Viewer:
         return bool(claim and claim.get("viewer") == self.viewer_id and claim.get("state") == "controlled")
 
     def _write_claim(self, state: str, epoch: int):
+        asked = (self.claim or {}).get("asked_at") if (self.claim or {}).get("epoch") == epoch else None
         self.claim = {"state": state, "viewer": self.viewer_id, "epoch": epoch, "browser": self.record["id"],
-                      "expires_at": time.time() + CLAIM_SECONDS, "at": time.time()}
+                      "expires_at": time.time() + CLAIM_SECONDS, "at": time.time(), "asked_at": asked or time.time()}
         for ident in self.siblings(self.record):
             self.spool.write(self.spool.folder("control") / f"{ident}.json", {**self.claim, "browser": ident})
         self.changed = True
@@ -178,8 +181,8 @@ class Viewer:
             self.claim = None
             self.changed = True
             return
-        if current["state"] != "requested":
-            return
+        if current["state"] != "requested" or time.time() - float(current.get("asked_at") or 0) < GRACE:
+            return  # the grace lets a bot call that began just before the request get published first
         records = [self.spool.read(self.spool.folder("browsers") / f"{ident}.json") for ident in self.siblings(self.record)]
         if records and all(record is not None and record.get("paused") == current["epoch"] for record in records):
             self._write_claim("controlled", int(current["epoch"]))
@@ -447,6 +450,7 @@ class Viewer:
                     self.ended = self._still_open() or "closed"
                 if now - checked >= 1.0:
                     checked = now
+                    self.refresh()
                     self.ended = self.ended or self._still_open()
                     self._advance_claim()
                     self.changed = True  # control files and asks change outside this socket

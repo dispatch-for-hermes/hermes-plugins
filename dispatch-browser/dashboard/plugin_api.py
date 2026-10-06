@@ -9,6 +9,7 @@ import asyncio
 import importlib.util
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -66,9 +67,67 @@ def _ws_allowed(ws) -> bool:
         return False
 
 
+_standing_at = 0.0
+LOCAL_CDP = ("ws://127.0.0.1:", "ws://localhost:", "ws://[::1]:", "http://127.0.0.1:", "http://localhost:")
+
+
+def _profile_homes():
+    from hermes_constants import get_default_hermes_root
+    root = Path(get_default_hermes_root())
+    yield "default", root
+    for config in sorted((root / "profiles").glob("*/config.yaml")):
+        yield config.parent.name, config.parent
+
+
+def _standing_url(home: Path):
+    try:
+        import yaml
+        config = yaml.safe_load((home / "config.yaml").read_text()) or {}
+        url = str(((config.get("browser") or {}).get("cdp_url") or "")).strip()
+    except Exception:  # noqa: BLE001
+        return None
+    return url if url.startswith(LOCAL_CDP) else None
+
+
+def _debugger_url(url: str):
+    if "/devtools/browser/" in url:
+        return url
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url.replace("ws://", "http://").rstrip("/") + "/json/version", timeout=0.4) as response:  # noqa: S310 - loopback only
+            found = json.loads(response.read(65536)).get("webSocketDebuggerUrl")
+        return found if isinstance(found, str) and cdp.LOOPBACK.match(found) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _publish_standing(force=False):
+    """List each bot's standing browser (the Chrome its config connects it to) while its port answers, so a
+    person can open it and sign in before the bot has used it. Its pause promise is the dashboard's to give for
+    itself; any agent using that Chrome publishes its own record, and a claim waits for those too."""
+    global _standing_at
+    now = time.time()
+    if not force and now - _standing_at < 3.0:
+        return
+    _standing_at = now
+    for profile, home in _profile_homes():
+        url = _standing_url(home)
+        endpoint = _debugger_url(url) if url else None
+        if not endpoint:
+            continue
+        ident = spool.standing_id(profile, url)
+        claim = spool.control(ident, now=now)
+        spool.write(spool.folder("browsers") / f"{ident}.json", {
+            "schema": spool.SCHEMA, "id": ident, "generation": "standing", "pid": os.getpid(), "profile": profile,
+            "source": ["cdp", url], "keys": [], "session_ids": [], "session_id": "", "endpoint": endpoint, "standing": True,
+            "opened_at": now, "agent_at": 0, "status": "live", "url": None, "busy": 0,
+            "paused": claim["epoch"] if claim else None, "seen_at": now})
+
+
 def _live_records():
     """Published browsers whose owner still vouches for them; one per Chrome (a shared real-profile Chrome
     used from two processes is published twice), newest bot use first."""
+    _publish_standing()
     now = time.time()
     found = {}
     for ident, record in spool.entries("browsers"):
@@ -120,6 +179,7 @@ def _listing(owner="", sessions=()):
 def _record(ident):
     if not spool.ID.match(ident):
         raise HTTPException(404, "No such browser")
+    _publish_standing(force=True)
     record = spool.read(spool.folder("browsers") / f"{ident}.json")
     if record is None or record.get("id") != ident or not spool.live(record) or not cdp.LOOPBACK.match(record.get("endpoint") or ""):
         raise HTTPException(404, "This browser has closed")
@@ -210,7 +270,7 @@ async def watch(ws: WebSocket, ident: str):
             viewer_id = hello["viewer"]
     except (asyncio.TimeoutError, ValueError):
         pass
-    viewer = stream.Viewer(spool, cdp, record, ws.send_json, _siblings)
+    viewer = stream.Viewer(spool, cdp, record, ws.send_json, _siblings, _publish_standing)
     try:
         await viewer.run(receive, viewer_id)
     except (WebSocketDisconnect, asyncio.CancelledError):

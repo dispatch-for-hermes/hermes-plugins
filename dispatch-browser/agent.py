@@ -257,8 +257,20 @@ def _call_id(tool_call_id, tool_name: str) -> str:
     return str(tool_call_id) if tool_call_id else f"{threading.get_ident()}:{tool_name}"
 
 
+def _standing() -> str | None:
+    """This profile's standing browser id, when its config connects it to a local Chrome (``browser.cdp_url``)."""
+    try:
+        from tools.browser_tool_cdp import _get_cdp_override_raw
+        raw = str(_get_cdp_override_raw() or "")
+    except Exception:  # noqa: BLE001
+        return None
+    return _spool.standing_id(profile_name(), raw) if raw.startswith(LOCAL_CDP) else None
+
+
 def controlled(ident: str | None) -> bool:
-    return bool(ident) and _spool.control(ident) is not None
+    """A person holds, or has asked for, this browser, or this profile's standing browser (the same Chrome, which
+    the dashboard lists under its own id)."""
+    return any(i and _spool.control(i) is not None for i in (ident, _standing()))
 
 
 def before_tool(tool_name="", args=None, task_id="", session_id="", tool_call_id=None, **_):
@@ -367,6 +379,11 @@ def tick(now: float | None = None) -> None:
             busy = _busy_count(ident, now)
             claim = _spool.control(ident, now=now)
             paused = claim["epoch"] if claim is not None and busy == 0 else None
+            if record.get("fallback") or record.get("shared"):  # a claim made on the standing listing
+                standing = _standing()
+                held = _spool.control(standing, now=now) if standing else None
+                if held is not None and claim is None:
+                    paused = held["epoch"] if busy == 0 else None
         if busy != record.get("busy") or paused != record.get("paused"):
             record.update(busy=busy, paused=paused, dirty=True)
         if record.get("dirty") or now - float(record.get("seen_at") or 0) >= HEARTBEAT:
