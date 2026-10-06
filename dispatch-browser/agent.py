@@ -574,7 +574,8 @@ def ask_user(args=None, task_id="", session_id="", **_):
 ASK_SCHEMA = {
     "name": ASK_TOOL,
     "description": ("Hand your browser to the user and wait until they give it back. Use it when a page needs the user "
-                    "themself: signing in, a one-time code, a CAPTCHA, or approving a payment or purchase. They watch and "
+                    "themself: a CAPTCHA, approving a payment or purchase, or a sign-in they'd rather do (sign in for "
+                    "them with the browser_vault_* tools first when you can). They watch and "
                     "control your browser from the Dispatch app; your browser tools are paused while they do. Returns when "
                     "they hand it back (take a fresh snapshot then), or after about six minutes if they haven't finished."),
     "parameters": {"type": "object", "properties": {
@@ -586,19 +587,23 @@ ASK_SCHEMA = {
 GUIDANCE = (
     "Your web browser and Dispatch: when the user asks you to open, pull up, show, look at or browse a website, "
     "use your own browser tools (browser_exec, or browser_navigate and the other browser_* tools). The user watches "
-    "your browser live in the Dispatch app (Watch Browser) and can take it over. desktop_preview is a different "
-    "thing: it opens a page on the user's own screen (in Dispatch, their phone's in-app browser) and you can't act "
-    "in it; use it only when they ask to see something on their phone or screen. When a page needs the user "
-    "themself (a sign-in, a one-time code, a CAPTCHA, approving a purchase), call browser_ask_user. "
-    + "If a page seems broken, empty or missing its controls, look at a screenshot before giving up: sign-in screens "
-    "and consent walls often sit in a frame or overlay that page text misses."
+    "your browser live in the Dispatch app (Watch Browser) and can take it over. desktop_preview opens a page on "
+    "the user's phone instead and you can't act in it; use it only when they ask for that. "
+    "Signing in is your job: browser_vault_list, then browser_vault_fill a saved login, or browser_vault_save_login "
+    "to ask the user for it (a secure prompt; it never enters the chat), browser_vault_enter_code for codes. If those "
+    "can't reach the form (it sits in a frame), ask the user whether they'll send the login in chat for you to type, "
+    "or sign in themselves (browser_ask_user). Use browser_ask_user for CAPTCHAs and approving payments. "
+    "A page that seems broken or empty is often a sign-in in a frame: print(capture_screenshot()) in browser_exec "
+    "so you see it."
 )
 BROWSING = __import__("re").compile(
     r"\b(browser|web ?site|web ?page|pull (it |that |this |something )?up|open (up )?(the |a |that |this |your )?(site|page|link|url|tab)s?\b|go to|navigate|look (it )?up|"
     r"google|search the web|https?://|www\.)|\b[a-z0-9-]+\.(com|org|net|io|dev|ai|co|app)\b", __import__("re").I)
 NUDGE = ("(Dispatch: for websites use your own browser tools, which the user can watch and take over in Watch Browser; "
-         "desktop_preview would open the page on the user's phone instead. A page that seems broken may be a sign-in "
-         "screen in a frame: check a screenshot, and for a sign-in, code or CAPTCHA call browser_ask_user and wait.)")
+         "desktop_preview would open the page on the user's phone instead. Sign in for the user: browser_vault_list / "
+         "browser_vault_fill / browser_vault_save_login; if those can't reach the form, ask whether they'll send the "
+         "login in chat or sign in themselves (browser_ask_user). A page that seems empty may be a sign-in in a frame: "
+         "print(capture_screenshot()) to see it.)")
 RECENT_BROWSING = 1800.0  # a chat whose bot used its browser this recently gets the reminder on every turn
 
 

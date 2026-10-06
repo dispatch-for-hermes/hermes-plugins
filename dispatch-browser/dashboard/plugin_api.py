@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 log = logging.getLogger("dispatch-browser")
 _ROOT = Path(__file__).parents[1]
-VERSION = "3.3.1"
+VERSION = "3.3.2"
 RETAIN_ENDED = 120.0
 MAX_VIEWERS = 8
 VIEWER_ID = re.compile(r"^[0-9a-f]{32}$")
