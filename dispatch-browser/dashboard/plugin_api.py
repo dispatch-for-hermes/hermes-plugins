@@ -2,6 +2,7 @@
 
 GET  /health                               what this gateway supports
 GET  /sessions?owner=&session=a,b          live browsers, optionally one profile's or some chats' only
+GET  /bots                                 each bot's own Chrome: ready, starting, not responding, or why it has none
 WS   /activity?owner=                      the same list, pushed when it changes (no page images)
 WS   /sessions/{id}/watch                  the live view and, while held, the person's input (stream.py)
 """
@@ -21,7 +22,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 log = logging.getLogger("dispatch-browser")
 _ROOT = Path(__file__).parents[1]
-VERSION = "3.2.1"
+VERSION = "3.3.1"
 RETAIN_ENDED = 120.0
 MAX_VIEWERS = 8
 VIEWER_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -40,8 +41,27 @@ def _load(name):
 spool = _load("spool")
 cdp = _load("cdp")
 stream = _load("stream")
+fleet = _load("fleet")
 router = APIRouter()
 _viewers = 0
+_supervisor = None
+
+
+def _supervise():
+    """Every bot gets this plugin and a Chrome of its own (fleet.py). One dashboard process per machine does it;
+    ``DISPATCH_BROWSER_OWN_CHROME=0`` turns it off."""
+    global _supervisor
+    if os.environ.get("DISPATCH_BROWSER_OWN_CHROME", "1").strip() == "0":
+        return
+    try:
+        supervisor = fleet.Supervisor(fleet.hermes_root(), _ROOT)
+        if supervisor.begin():
+            _supervisor = supervisor
+    except Exception:  # noqa: BLE001 - watching still works without it
+        log.warning("dispatch-browser: couldn't start looking after the bots' Chromes", exc_info=True)
+
+
+_supervise()
 
 
 def _missing():
@@ -76,11 +96,7 @@ LOCAL_CDP = ("ws://127.0.0.1:", "ws://localhost:", "ws://[::1]:", "http://127.0.
 
 
 def _profile_homes():
-    from hermes_constants import get_default_hermes_root
-    root = Path(get_default_hermes_root())
-    yield "default", root
-    for config in sorted((root / "profiles").glob("*/config.yaml")):
-        yield config.parent.name, config.parent
+    return fleet.profiles(fleet.hermes_root())  # the bots Hermes itself lists (no deleted or half-made ones)
 
 
 def _standing_url(home: Path):
@@ -139,17 +155,29 @@ async def _standing_async(force=False):
 
 
 def _write_standing(now):
-    for profile, home in _profile_homes():
+    homes = [(profile, home, _standing_url(home)) for profile, home in _profile_homes()]
+    for profile, home, url in homes:
+        if not url or _copied(profile, url, homes):
+            continue
         try:  # one bot's trouble never hides the rest
-            _write_one_standing(profile, home, now)
+            _write_one_standing(profile, url, now)
         except Exception:  # noqa: BLE001
             log.debug("dispatch-browser: standing browser for %s skipped", profile, exc_info=True)
 
 
-def _write_one_standing(profile, home, now):
-    url = _standing_url(home)
-    if not url:
-        return
+def _copied(profile, url, homes) -> bool:
+    """A bot pointing at another bot's Chrome (a clone copies browser.cdp_url, until fleet.py gives it its own) isn't
+    listed with it: the bot the Chrome belongs to (its state file names the port) or, without one, the first is."""
+    port = fleet.port_of(url)
+    sharing = [p for p, _, other in homes if other and fleet.port_of(other) == port]
+    if len(sharing) < 2:
+        return False
+    root = fleet.hermes_root()
+    owner = next((p for p in sharing if fleet.read_state(root, p).get("port") == port), sharing[0])
+    return profile != owner
+
+
+def _write_one_standing(profile, url, now):
     ident = spool.standing_id(profile, url)
     endpoint = _debugger_url(url)
     if endpoint:
@@ -264,7 +292,23 @@ def health():
     missing, drift = _missing(), _drift()
     return {"ok": True, "schema": "dispatch-browser.health.v3", "version": VERSION, "protocol": stream.PROTOCOL,
             "installed": not missing and not drift, "missing": missing, "drift": drift,
-            "features": {"watch": True, "control": True, "ask": True}}
+            "features": {"watch": True, "control": True, "ask": True, "own_chrome": _own_chrome()}}
+
+
+def _own_chrome() -> bool:
+    return _supervisor is not None or os.environ.get("DISPATCH_BROWSER_OWN_CHROME", "1").strip() != "0"
+
+
+@router.get("/bots")
+def bots():  # sync: FastAPI runs it on a worker thread
+    """Each bot's own Chrome: ``ready``, ``starting``, ``not_responding``, ``external`` (a Chrome the person runs),
+    or why it has none: ``off`` (plugin disabled there), ``real_profile``, ``remote``, ``fixed``, ``camofox``,
+    ``released`` (the person removed its ``cdp_url``), ``no_chrome``, ``port_taken``, ``no_port``."""
+    if _supervisor is not None and _supervisor.statuses:
+        rows = list(_supervisor.statuses.values())
+    else:
+        rows = fleet.statuses(fleet.hermes_root())
+    return {"schema": "dispatch-browser.bots.v1", "own_chrome": _own_chrome(), "bots": rows}
 
 
 @router.get("/sessions")

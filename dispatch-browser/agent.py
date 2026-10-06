@@ -45,6 +45,7 @@ BLOCKED = ("The user has taken over your browser and is using it right now. Don'
            "they hand it back. To wait for them, call browser_ask_user; otherwise carry on with other work.")
 
 _spool = None
+_fleet = None
 _lock = threading.Lock()
 _browsers: dict[str, dict] = {}   # id -> record (this process's browsers only)
 _keys: dict[str, str] = {}        # Hermes session key -> browser id
@@ -296,6 +297,27 @@ def own_session(args: dict | None) -> str | None:
     return name if len(name) <= 64 else f"{base}-{hashlib.sha256(given.encode()).hexdigest()[:16]}"
 
 
+_starting: dict[str, float] = {}  # url -> when a start last failed (not retried on every call)
+
+
+def _own_chrome_up() -> None:
+    """Before a browser call: when this bot's own Chrome (fleet.py) isn't running, start it and wait for it, so the
+    call doesn't fail on a closed port. The dashboard's supervisor does the same within seconds; this covers a bot
+    that browses first."""
+    if _fleet is None:
+        return
+    try:
+        from tools.browser_tool_cdp import _get_cdp_override_raw
+        raw = str(_get_cdp_override_raw() or "")
+    except Exception:  # noqa: BLE001
+        return
+    if not _fleet.port_of(raw) or _reachable(raw) or time.time() - _starting.get(raw, 0) < 30:
+        return
+    from hermes_constants import get_hermes_home
+    if not _fleet.ensure(profile_name(), Path(get_hermes_home()), raw):
+        _starting[raw] = time.time()
+
+
 def before_tool(tool_name="", args=None, task_id="", session_id="", tool_call_id=None, **_):
     """``pre_tool_call``: refuse a browser tool while a person holds or has asked for that browser; count
     running calls. The claim check and the count happen under ``_lock``, the same lock ``tick`` holds while it
@@ -304,6 +326,7 @@ def before_tool(tool_name="", args=None, task_id="", session_id="", tool_call_id
         return None
     directive = None
     try:
+        _own_chrome_up()
         args = dict(args or {})
         if tool_name == BROWSER_EXEC:
             session = own_session(args)
@@ -388,6 +411,8 @@ RESOLVE_EVERY = 5.0  # seconds between checks that a discovery-root Chrome is st
 def tick(now: float | None = None) -> None:
     """One pass: pick up browsers a running call opened, refresh endpoints and heartbeats, retire closed ones."""
     now = time.time() if now is None else now
+    if _fleet is not None:
+        _fleet.reap()  # a Chrome this process started for its bot and that has since exited
     with _lock:
         pending = dict(_pending)
     for key, call in pending.items():
@@ -610,9 +635,9 @@ def ask_available() -> bool:
         return False
 
 
-def install(spool_module) -> list[str]:
-    global _spool
-    _spool = spool_module
+def install(spool_module, fleet_module=None) -> list[str]:
+    global _spool, _fleet
+    _spool, _fleet = spool_module, fleet_module
     found = problems()
     if found:
         log.warning("dispatch-browser: off, Hermes changed: %s", "; ".join(found))

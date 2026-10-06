@@ -26,6 +26,29 @@ that listing holds back every process that bot runs in (they check the same stan
 that Chrome is open ("profile locked"), so on a Mac where Chrome is always running, `/browser connect` is the
 way to give a bot a signed-in browser.
 
+## Every bot, its own Chrome (3.3)
+
+Install the plugin once, for the main profile. The dashboard (`fleet.py`, one supervisor per machine) then:
+
+- **adds the plugin to every bot** that lacks it or has an older copy, and enables it there (keeping the bot's
+  other plugins on), including bots made later. A profile that lists `dispatch-browser` in `plugins.disabled`
+  is left alone.
+- **gives each bot a headless Chrome of its own** on a loopback port, with its profile in `<bot home>/chrome-debug`
+  (the folder Hermes' own `/browser connect` uses), and points `browser.cdp_url` at it. Sign-ins stay between
+  turns and restarts. A bot already connected to a local Chrome keeps it. Chrome is Google Chrome, Chromium,
+  Brave or Edge where Hermes looks for them, else Playwright's Chromium; `DISPATCH_BROWSER_CHROME` names one.
+- **keeps them running**: a Chrome that exits is started again; one whose DevTools port stops answering for about
+  a minute (frozen) is sampled (macOS, into `<hermes root>/dispatch-browser/freezes`), ended and started again.
+  A bot that browses before the dashboard has started its Chrome starts it itself. A deleted bot's Chrome ends.
+- **gives a copied bot its own Chrome**: a cloned profile copies its source's `browser.cdp_url`; the bot whose
+  Chrome it is keeps the port and the copy is moved to a new one.
+- **leaves alone** `use_real_profile`, a remote or fixed-id `cdp_url`, Camofox, and any bot whose `cdp_url` the
+  person removes after the plugin set it (that is how to opt a bot out). `DISPATCH_BROWSER_OWN_CHROME=0` in the
+  dashboard's environment turns the whole thing off.
+
+`GET /bots` reports each bot's Chrome (`ready`, `starting`, `not_responding`, or why it has none) and Dispatch
+says so when there is no page to show. State lives in `<hermes root>/dispatch-browser/chromes/<profile>.json`.
+
 ## How it works
 
 - **Agent processes** (the messaging gateway, the dashboard's chat gateway, profile chats, cron) load
@@ -67,11 +90,10 @@ mismatch no hook or tool is registered and `/health` reports the drift.
 ## Install
 
 ```sh
-rsync -a --delete --exclude tests --exclude __pycache__ gateway-plugin/dispatch-browser/ ~/.hermes/plugins/dispatch-browser/
-hermes plugins enable dispatch-browser
+hermes plugins install dispatch-for-hermes/hermes-plugins/dispatch-browser --enable
 ```
 
-Then restart the dashboard and the gateways. Hermes' own Python needs `websockets` and `psutil`; both ship
+Then restart the dashboard and the gateways. The dashboard adds the plugin to the other bots. Hermes' own Python needs `websockets` and `psutil`; both ship
 with Hermes 0.21.5. Earlier Dispatch builds (163–166) shipped a different `dispatch-browser` that replaced the
 bot's browser tools with a Chrome extension; installing this one removes that design: also delete
 `plugins.entries.dispatch-browser.granted_capabilities` and restore `browser.backend` if that setup changed them.
@@ -80,7 +102,7 @@ bot's browser tools with a Chrome extension; installing this one removes that de
 
 ```sh
 cd gateway-plugin/dispatch-browser/tests
-uv run --no-project --with fastapi --with httpx --with websockets --with uvicorn --with psutil python -m unittest -q test_browser
+uv run --no-project --with fastapi --with httpx --with websockets --with uvicorn --with psutil --with pyyaml python -m unittest -q test_browser test_fleet
 ```
 
 Hermes is faked (its bootstrap rewrites the install). The live tests drive a real headless Chrome on a

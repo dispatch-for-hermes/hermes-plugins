@@ -77,26 +77,28 @@ solve a CAPTCHA. Bots keep every browser tool Hermes gives them; the plugin over
 The easy way: open **Watch Browser** for a bot in Dispatch. When your gateway doesn't have this plugin, Dispatch offers
 to have your Hermes bot install it.
 
-To do it yourself, on the computer that runs your Hermes gateway. Each bot profile loads its own plugins, so install
-it for the main profile and for each other profile (`hermes profile list`):
+To do it yourself, on the computer that runs your Hermes gateway, install it once, for the main profile:
 
 ```bash
 hermes plugins install dispatch-for-hermes/hermes-plugins/dispatch-browser --enable
-hermes -p <profile> plugins install dispatch-for-hermes/hermes-plugins/dispatch-browser --enable
 ```
 
 Then restart `hermes serve` or `hermes dashboard` (or the Hermes app) and the messaging gateway, if one runs. To update
-an older copy, run the same commands with `--force` added.
+an older copy, run the same command with `--force` added. Each bot's browser is a headless Google Chrome (or
+Chromium), so one of them needs to be installed on that computer.
 
-### Which browsers it shows
+### Every bot, its own browser
 
-Hermes's own browser for each bot (its Chromium, or the Browser Use harness driving it), a Chrome you connected with
-`/browser connect` (`browser.cdp_url` on this computer), and the real-profile Chrome. Not cloud browsers, Lightpanda,
-or a remote debugging address.
+Once the dashboard restarts, the plugin adds itself to every other bot profile, including bots you make later (a
+profile that disabled it is left alone), and gives each bot a headless Chrome of its own. Its profile folder is the
+bot's `chrome-debug` folder, so sign-ins stay between turns and restarts, and Dispatch can show it any time: open it,
+take it over and sign in to sites before the bot needs them. A Chrome that crashes or freezes is restarted, a copied
+bot gets its own Chrome instead of sharing its source's, and a deleted bot's Chrome is shut down.
 
-Hermes closes its own headless browser when the bot's turn ends. A bot connected to a Chrome of its own keeps that
-browser, and its sign-ins, between turns. Dispatch lists it whenever it's running, so you can open it, take it over
-and sign in to sites before the bot needs them.
+Bots set up another way keep their setup: a Chrome already connected with `/browser connect`, the real-profile Chrome,
+Camofox, or a remote debugging address. To give a bot back its previous browser, remove `browser.cdp_url` from its
+`config.yaml`; the plugin then leaves that bot alone. `DISPATCH_BROWSER_OWN_CHROME=0` in the dashboard's environment
+turns the whole thing off.
 
 ### How it works
 

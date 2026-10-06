@@ -29,7 +29,7 @@ def load(name: str):
 def register(ctx):
     try:
         agent = load("agent")
-        if agent.install(load("spool")):
+        if agent.install(load("spool"), load("fleet")):
             return
         ctx.register_hook("pre_tool_call", agent.before_tool)
         ctx.register_hook("post_tool_call", agent.after_tool)
