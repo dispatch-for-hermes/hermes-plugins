@@ -18,8 +18,9 @@ phone → server
 - ``view {width, height, scale}`` its stage in CSS pixels and its pixel density. While this viewer holds the
   browser, the page is laid out at that size (a phone-sized viewport), and back at its own once given back. ``tab {id}`` watch one tab; ``follow`` follow the bot's tab.
 - ``take`` / ``give`` ask for / hand back the browser. While this viewer holds it (state ``person``, matching
-  ``epoch``): ``tap {x, y, epoch}``, ``scroll {x, y, dy, epoch}`` (x, y as 0–1 fractions of the frame; dy in
-  page pixels), ``text {text, epoch}``, ``key {key, epoch}``, ``go {url, epoch}``, ``nav {action, epoch}``.
+  ``epoch``): ``move {x, y}`` (the phone's pointer moved; hover), ``tap {x, y}`` (a click), ``down`` / ``up {x, y}``
+  (a drag), ``scroll {x, y, dy, dx}`` (x, y as 0–1 fractions of the frame; dy, dx in page pixels), ``text {text}``,
+  ``key {key}``, ``go {url}``, ``nav {action}``, each with the ``epoch``. Only the newest pointer move waits.
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ PROTOCOL = 3
 IN_FLIGHT = 2
 PING_EVERY = 10.0
 CLAIM_SECONDS = 120.0
+STILL_AFTER = 1.5        # no screencast frame for this long: send a still instead
 GRACE = 2.0              # a request waits at least this long for the bots' pause promises (agents publish each second)   # a held browser stays held this long after its viewer drops (switching apps for a code)
 RENEW_EVERY = 5.0
 # (longest side cap, JPEG quality), slow to sharp
@@ -84,6 +86,11 @@ class Viewer:
         self.claim = None       # this viewer's control file contents, while it asks for or holds the browser
         self.sent_state = None
         self.inbox: asyncio.Queue = asyncio.Queue(maxsize=64)
+        self.next_move = None   # the newest pointer move not yet sent to the page
+        self.framed_at = 0.0    # when a frame last went to the phone
+        self.stilled_at = 0.0   # when a fallback still was last taken
+        self.pressed = False    # a drag holds the page's left button
+        self.at = None          # where the page's pointer is (CSS px)
 
     # Chrome events (called from the CDP reader)
     def on_event(self, method, params, session_id):
@@ -223,7 +230,15 @@ class Viewer:
         elif kind == "follow":
             self.follow = True
             self.changed = True
-        elif kind in ("take", "give", "tap", "scroll", "text", "key", "go", "nav"):
+        elif kind == "move":
+            fresh = self.next_move is None
+            self.next_move = message  # a pointer only needs its newest position
+            if fresh:
+                try:
+                    self.inbox.put_nowait({"type": "move"})
+                except asyncio.QueueFull:
+                    self.next_move = None
+        elif kind in ("take", "give", "tap", "down", "up", "scroll", "text", "key", "go", "nav"):
             try:
                 self.inbox.put_nowait(message)
             except asyncio.QueueFull:
@@ -238,8 +253,11 @@ class Viewer:
                 await self.send_text({"type": "error", "message": problem})
             return
         if kind == "give":
+            await self._lift()
             self._release()
             return
+        if kind == "move":
+            message, self.next_move = self.next_move or message, None
         claim = self._control()
         if (not claim or claim.get("viewer") != self.viewer_id or claim.get("state") != "controlled"
                 or message.get("epoch") != claim.get("epoch") or not self.session):
@@ -255,7 +273,17 @@ class Viewer:
             return float(x) * width, float(y) * height
 
         call = self.cdp.call
-        if kind == "tap" and (at := point()):
+        if kind == "move" and (at := point()):
+            self.at = at
+            await call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": at[0], "y": at[1],
+                                                    **({"button": "left", "buttons": 1} if self.pressed else {})}, session)
+        elif kind == "down" and (at := point()):
+            self.at, self.pressed = at, True
+            await call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": at[0], "y": at[1]}, session)
+            await call("Input.dispatchMouseEvent", {"type": "mousePressed", "x": at[0], "y": at[1], "button": "left", "buttons": 1, "clickCount": 1}, session)
+        elif kind == "up":
+            await self._lift(point())
+        elif kind == "tap" and (at := point()):
             x, y = at
             await call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y}, session)
             await call("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}, session)
@@ -286,6 +314,18 @@ class Viewer:
                 if 0 <= index < len(entries):
                     await call("Page.navigateToHistoryEntry", {"entryId": entries[index]["id"]}, session)
         self.wake.set()
+
+    async def _lift(self, at=None):
+        """Ends a drag (a give-back or a lost viewer never leaves the page's button held)."""
+        if not self.pressed or not self.session:
+            self.pressed = False
+            return
+        self.pressed = False
+        x, y = at or self.at or (0, 0)
+        try:
+            await self.cdp.call("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1}, self.session, timeout=3)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _adapt(self):
         now = time.monotonic()
@@ -369,6 +409,12 @@ class Viewer:
         result = await self.cdp.call("Target.attachToTarget", {"targetId": target, "flatten": True})
         self.session = result["sessionId"]
         self.params = self._params()
+        # Chrome paints only its front tab: a bot tab opened in the background sends no screencast frames.
+        # Bringing it forward happens inside the bot's own browser.
+        try:
+            await self.cdp.call("Page.bringToFront", {}, self.session, timeout=3)
+        except Exception:  # noqa: BLE001
+            pass
         # One still first: a page that isn't changing sends no screencast frames.
         try:
             metrics = await self.cdp.call("Page.getLayoutMetrics", session=self.session, timeout=3)
@@ -381,6 +427,17 @@ class Viewer:
             pass
         await self.cdp.call("Page.startScreencast", self.params, self.session)
         self.wake.set()
+
+    async def _still(self):
+        try:
+            shot = await self.cdp.call("Page.captureScreenshot", {"format": "jpeg", "quality": LEVELS[self.level][1],
+                                                                  "optimizeForSpeed": True}, self.session, timeout=5)
+            metrics = await self.cdp.call("Page.getLayoutMetrics", session=self.session, timeout=3)
+            view = metrics.get("cssVisualViewport") or {}
+            if self.pending is None and shot.get("data"):
+                self.pending = (shot["data"], {"deviceWidth": view.get("clientWidth"), "deviceHeight": view.get("clientHeight")}, None)
+        except Exception:  # noqa: BLE001 - the next pass tries again
+            pass
 
     async def _send_frame(self):
         data, metadata, ack = self.pending
@@ -488,8 +545,14 @@ class Viewer:
                     if state != self.sent_state:
                         self.sent_state = state
                         await self.send_text(state)
+                if (self.session and self.pending is None and not self.in_flight
+                        and now - self.framed_at > STILL_AFTER and now - self.stilled_at > STILL_AFTER):
+                    # Chrome sent nothing for a while (a page it isn't painting): a still keeps the view honest.
+                    self.stilled_at = now
+                    await self._still()
                 if self.pending is not None and len(self.in_flight) < IN_FLIGHT:
                     await self._send_frame()
+                    self.framed_at = now
                 for seq, sent in list(self.in_flight.items()):  # a lost ack must not stall the stream
                     if now - sent > 5:
                         self.in_flight.pop(seq, None)
@@ -501,6 +564,7 @@ class Viewer:
                 if task is not None:
                     task.cancel()
             await asyncio.gather(*(t for t in (reader, actor) if t is not None), return_exceptions=True)
+            await self._lift()
             if self.ended:  # nothing left to hold
                 self._release()
             if self.emulated and self.session and not self.cdp.closed.is_set():
