@@ -66,6 +66,43 @@ python3 -m unittest dispatch-push/test_push.py
 
 Tests that need `cryptography` or `fastapi` skip without them.
 
+## dispatch-browser: watch and take over a bot's browser
+
+See the browser a bot is using, live, in Dispatch, and take it over when it needs you: to sign in, enter a code or
+solve a CAPTCHA. Bots keep every browser tool Hermes gives them; the plugin overrides nothing. It adds one tool,
+`browser_ask_user`, which lets a bot hand you its browser and wait until you give it back.
+
+### Install
+
+The easy way: open **Watch Browser** for a bot in Dispatch. When your gateway doesn't have this plugin, Dispatch offers
+to have your Hermes bot install it.
+
+To do it yourself, on the computer that runs your Hermes gateway. Each bot profile loads its own plugins, so install
+it for the main profile and for each other profile (`hermes profile list`):
+
+```bash
+hermes plugins install dispatch-for-hermes/hermes-plugins/dispatch-browser --enable
+hermes -p <profile> plugins install dispatch-for-hermes/hermes-plugins/dispatch-browser --enable
+```
+
+Then restart `hermes serve` or `hermes dashboard` (or the Hermes app) and the messaging gateway, if one runs. To update
+an older copy, run the same commands with `--force` added.
+
+### Which browsers it shows
+
+Hermes's own browser for each bot (its Chromium, or the Browser Use harness driving it), a Chrome you connected with
+`/browser connect` (`browser.cdp_url` on this computer), and the real-profile Chrome. Not cloud browsers, Lightpanda,
+or a remote debugging address.
+
+Hermes closes its own headless browser when the bot's turn ends. A bot connected to a Chrome of its own keeps that
+browser, and its sign-ins, between turns, so you can watch it or take it over at any time.
+
+### How it works
+
+The bot's browser is never exposed: the plugin reads Chrome's own screencast on this computer and relays it to Dispatch
+through your gateway's normal sign-in. While you hold a browser, that bot's browser tools are refused (it can call
+`browser_ask_user` to wait for you), and what you tap and type reaches only that browser's page.
+
 ## License
 
 MIT
