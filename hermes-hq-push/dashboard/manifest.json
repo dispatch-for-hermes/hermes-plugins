@@ -1,0 +1,9 @@
+{
+  "name": "hermes-hq-push",
+  "label": "Hermes HQ push",
+  "description": "Device registration and notification actions for the Hermes HQ iPhone app",
+  "version": "0.5.0",
+  "icon": "Smartphone",
+  "tab": {"hidden": true},
+  "api": "plugin_api.py"
+}

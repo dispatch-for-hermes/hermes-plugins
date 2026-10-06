@@ -1,0 +1,13 @@
+name: hermes-hq-browser
+version: "3.4.0"
+manifest_version: 2
+kind: standalone
+description: "Watch a bot's browser live from Hermes HQ and take it over. Bots keep all their browser tools; they can hand you their browser with browser_ask_user."
+author: Hermes HQ
+requires_hermes: ">=0.21.5"
+python_dependencies: []
+provides_tools:
+  - browser_ask_user
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call

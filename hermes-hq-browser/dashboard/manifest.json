@@ -1,0 +1,9 @@
+{
+  "name": "hermes-hq-browser",
+  "label": "Hermes HQ Browser",
+  "description": "Watch and take over a bot's browser from Hermes HQ",
+  "version": "3.4.0",
+  "icon": "Globe",
+  "tab": {"hidden": true},
+  "api": "plugin_api.py"
+}
