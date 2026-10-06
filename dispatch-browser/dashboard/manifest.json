@@ -2,7 +2,7 @@
   "name": "dispatch-browser",
   "label": "Dispatch Browser",
   "description": "Watch and take over a bot's browser from Dispatch",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "icon": "Globe",
   "tab": {"hidden": true},
   "api": "plugin_api.py"

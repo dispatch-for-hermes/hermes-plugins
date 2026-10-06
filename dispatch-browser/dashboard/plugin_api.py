@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -20,7 +21,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 log = logging.getLogger("dispatch-browser")
 _ROOT = Path(__file__).parents[1]
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 RETAIN_ENDED = 120.0
 MAX_VIEWERS = 8
 VIEWER_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -68,6 +69,9 @@ def _ws_allowed(ws) -> bool:
 
 
 _standing_at = 0.0
+_standing_lock = threading.Lock()
+_standing_seen: dict = {}  # standing id -> (endpoint, when its Chrome last answered)
+STANDING_GRACE = 20.0  # a Chrome busy for a moment stays listed this long
 LOCAL_CDP = ("ws://127.0.0.1:", "ws://localhost:", "ws://[::1]:", "http://127.0.0.1:", "http://localhost:")
 
 
@@ -94,7 +98,7 @@ def _debugger_url(url: str):
         return url
     import urllib.request
     try:
-        with urllib.request.urlopen(url.replace("ws://", "http://").rstrip("/") + "/json/version", timeout=0.4) as response:  # noqa: S310 - loopback only
+        with urllib.request.urlopen(url.replace("ws://", "http://").rstrip("/") + "/json/version", timeout=2) as response:  # noqa: S310 - loopback only
             found = json.loads(response.read(65536)).get("webSocketDebuggerUrl")
         return found if isinstance(found, str) and cdp.LOOPBACK.match(found) else None
     except Exception:  # noqa: BLE001
@@ -104,18 +108,38 @@ def _debugger_url(url: str):
 def _publish_standing(force=False):
     """List each bot's standing browser (the Chrome its config connects it to) while its port answers, so a
     person can open it and sign in before the bot has used it. Its pause promise is the dashboard's to give for
-    itself; any agent using that Chrome publishes its own record, and a claim waits for those too."""
+    itself; any agent using that Chrome publishes its own record, and a claim waits for those too.
+    Blocking (it asks each Chrome over HTTP): call it off the event loop, as ``_standing_async`` does."""
     global _standing_at
-    now = time.time()
-    if not force and now - _standing_at < 3.0:
-        return
-    _standing_at = now
+    if not _standing_lock.acquire(blocking=force):
+        return  # another thread is publishing right now
+    try:
+        now = time.time()
+        if not force and now - _standing_at < 3.0:
+            return
+        _standing_at = now
+        _write_standing(now)
+    finally:
+        _standing_lock.release()
+
+
+async def _standing_async(force=False):
+    await asyncio.to_thread(_publish_standing, force)
+
+
+def _write_standing(now):
     for profile, home in _profile_homes():
         url = _standing_url(home)
-        endpoint = _debugger_url(url) if url else None
-        if not endpoint:
+        if not url:
             continue
         ident = spool.standing_id(profile, url)
+        endpoint = _debugger_url(url)
+        if endpoint:
+            _standing_seen[ident] = (endpoint, now)
+        else:
+            endpoint, seen = _standing_seen.get(ident, (None, 0.0))
+            if not endpoint or now - seen > STANDING_GRACE:
+                continue
         claim = spool.control(ident, now=now)
         spool.write(spool.folder("browsers") / f"{ident}.json", {
             "schema": spool.SCHEMA, "id": ident, "generation": "standing", "pid": os.getpid(), "profile": profile,
@@ -127,7 +151,6 @@ def _publish_standing(force=False):
 def _live_records():
     """Published browsers whose owner still vouches for them; one per Chrome (a shared real-profile Chrome
     used from two processes is published twice), newest bot use first."""
-    _publish_standing()
     now = time.time()
     found = {}
     for ident, record in spool.entries("browsers"):
@@ -179,7 +202,7 @@ def _listing(owner="", sessions=()):
 def _record(ident):
     if not spool.ID.match(ident):
         raise HTTPException(404, "No such browser")
-    _publish_standing(force=True)
+    _publish_standing(force=True)  # blocking: watch() calls this from a thread
     record = spool.read(spool.folder("browsers") / f"{ident}.json")
     if record is None or record.get("id") != ident or not spool.live(record) or not cdp.LOOPBACK.match(record.get("endpoint") or ""):
         raise HTTPException(404, "This browser has closed")
@@ -195,7 +218,8 @@ def health():
 
 
 @router.get("/sessions")
-def sessions(owner: str = "", session: str = ""):
+def sessions(owner: str = "", session: str = ""):  # sync: FastAPI runs it on a worker thread
+    _publish_standing()
     wanted = tuple(s for s in session.split(",") if s)[:32]
     return _listing(owner[:128], wanted)
 
@@ -218,7 +242,8 @@ async def activity(ws: WebSocket):
     closed = asyncio.create_task(drain())
     try:
         while not closed.done():
-            listing = _listing(owner)
+            await _standing_async()
+            listing = await asyncio.to_thread(_listing, owner)
             if listing != last:
                 last = listing
                 await ws.send_json(listing)
@@ -243,7 +268,7 @@ async def watch(ws: WebSocket, ident: str):
         await ws.close(code=4401)
         return
     try:
-        record = _record(ident)
+        record = await asyncio.to_thread(_record, ident)
     except HTTPException:
         await ws.close(code=4404, reason="This browser has closed")
         return
@@ -270,15 +295,19 @@ async def watch(ws: WebSocket, ident: str):
             viewer_id = hello["viewer"]
     except (asyncio.TimeoutError, ValueError):
         pass
-    viewer = stream.Viewer(spool, cdp, record, ws.send_json, _siblings, _publish_standing)
+    viewer = stream.Viewer(spool, cdp, record, ws.send_json, _siblings, _standing_async)
     try:
         await viewer.run(receive, viewer_id)
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
-    except Exception:  # noqa: BLE001
-        log.debug("dispatch-browser: stream ended with an error", exc_info=True)
+    except Exception as error:  # noqa: BLE001
+        # A Chrome that doesn't answer (busy, frozen or restarting) is the browser's trouble, not the stream's:
+        # the phone says so and keeps trying.
+        unresponsive = isinstance(error, (TimeoutError, asyncio.TimeoutError, OSError))
+        log.log(logging.INFO if unresponsive else logging.WARNING, "dispatch-browser: stream for %s ended: %s",
+                ident, type(error).__name__, exc_info=not unresponsive)
         try:
-            await ws.send_json({"type": "ended", "reason": "error"})
+            await ws.send_json({"type": "ended", "reason": "unresponsive" if unresponsive else "error"})
         except Exception:  # noqa: BLE001
             pass
     finally:

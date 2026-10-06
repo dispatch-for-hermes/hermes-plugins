@@ -46,10 +46,19 @@ KEYS = {  # key -> (code, windowsVirtualKeyCode, text)
 }
 
 
-def public(record: dict) -> dict:
+ACTIVE_FOR = 90.0  # a bot's browser counts as in use this long after its last browser tool
+
+
+def public(record: dict, now: float | None = None) -> dict:
+    """What a phone sees of a browser. ``active``: a bot is using it now (a browser tool running, or one in the
+    last ACTIVE_FOR seconds). A bot's own Chrome stays open between tasks, and an idle one is not news."""
+    now = time.time() if now is None else now
+    busy = int(record.get("busy") or 0)
+    agent_at = float(record.get("agent_at") or 0)
     return {"id": record.get("id"), "profile": record.get("profile"), "session_id": record.get("session_id"),
             "session_ids": list(record.get("session_ids") or [])[-16:], "opened_at": record.get("opened_at"),
-            "agent_at": record.get("agent_at"), "url": record.get("url"), "busy": int(record.get("busy") or 0)}
+            "agent_at": record.get("agent_at"), "url": record.get("url"), "busy": busy,
+            "active": busy > 0 or (agent_at > 0 and now - agent_at < ACTIVE_FOR)}
 
 
 class Viewer:
@@ -507,7 +516,9 @@ class Viewer:
                     self.ended = self._still_open() or "closed"
                 if now - checked >= 1.0:
                     checked = now
-                    self.refresh()
+                    refreshed = self.refresh()
+                    if asyncio.iscoroutine(refreshed):
+                        await refreshed
                     self.ended = self.ended or self._still_open()
                     self._advance_claim()
                     self.changed = True  # control files and asks change outside this socket
