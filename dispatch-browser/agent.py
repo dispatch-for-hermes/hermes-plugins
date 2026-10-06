@@ -564,13 +564,17 @@ GUIDANCE = (
     "your browser live in the Dispatch app (Watch Browser) and can take it over. desktop_preview is a different "
     "thing: it opens a page on the user's own screen (in Dispatch, their phone's in-app browser) and you can't act "
     "in it; use it only when they ask to see something on their phone or screen. When a page needs the user "
-    "themself (a sign-in, a one-time code, a CAPTCHA, approving a purchase), call browser_ask_user."
+    "themself (a sign-in, a one-time code, a CAPTCHA, approving a purchase), call browser_ask_user. "
+    + "If a page seems broken, empty or missing its controls, look at a screenshot before giving up: sign-in screens "
+    "and consent walls often sit in a frame or overlay that page text misses."
 )
 BROWSING = __import__("re").compile(
     r"\b(browser|web ?site|web ?page|pull (it |that |this |something )?up|open (up )?(the |a |that |this |your )?(site|page|link|url|tab)s?\b|go to|navigate|look (it )?up|"
     r"google|search the web|https?://|www\.)|\b[a-z0-9-]+\.(com|org|net|io|dev|ai|co|app)\b", __import__("re").I)
 NUDGE = ("(Dispatch: for websites use your own browser tools, which the user can watch and take over in Watch Browser; "
-         "desktop_preview would open the page on the user's phone instead.)")
+         "desktop_preview would open the page on the user's phone instead. A page that seems broken may be a sign-in "
+         "screen in a frame: check a screenshot, and for a sign-in, code or CAPTCHA call browser_ask_user and wait.)")
+RECENT_BROWSING = 1800.0  # a chat whose bot used its browser this recently gets the reminder on every turn
 
 
 def system_section(_session=None) -> str:
@@ -578,12 +582,21 @@ def system_section(_session=None) -> str:
     return GUIDANCE if ask_available() else ""
 
 
-def before_llm(user_message=None, **_):
-    """``pre_llm_call``: a one-line reminder on turns that talk about browsing, so chats that began before the
-    plugin was installed get the same steer. Never on other turns."""
+def _browsed_recently(session_id: str, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    with _lock:
+        return any(session_id in (r.get("session_ids") or []) and now - float(r.get("agent_at") or 0) < RECENT_BROWSING
+                   for r in _browsers.values())
+
+
+def before_llm(user_message=None, session_id="", **_):
+    """``pre_llm_call``: a short reminder on turns that talk about browsing, and on every turn of a chat whose bot
+    is in the middle of browsing ("find dinner times" names no site), so chats that began before the plugin was
+    installed get the same steer. Never on other turns."""
     try:
         text = user_message if isinstance(user_message, str) else str(user_message or "")
-        if text and BROWSING.search(text[:4000]) and ask_available():
+        browsing = bool(text and BROWSING.search(text[:4000]))
+        if (browsing or (session_id and _browsed_recently(str(session_id)))) and ask_available():
             return {"context": NUDGE}
     except Exception:  # noqa: BLE001
         pass

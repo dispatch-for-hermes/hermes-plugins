@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 log = logging.getLogger("dispatch-browser")
 _ROOT = Path(__file__).parents[1]
-VERSION = "3.2.0"
+VERSION = "3.2.1"
 RETAIN_ENDED = 120.0
 MAX_VIEWERS = 8
 VIEWER_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -140,25 +140,32 @@ async def _standing_async(force=False):
 
 def _write_standing(now):
     for profile, home in _profile_homes():
-        url = _standing_url(home)
-        if not url:
-            continue
-        ident = spool.standing_id(profile, url)
-        endpoint = _debugger_url(url)
-        if endpoint:
-            _standing_seen[ident] = (endpoint, now)
-        else:
-            # Not answering. A frozen Chrome still holds its port (the phone should hear "not responding", and its
-            # watchdog restarts it); one that is gone is listed a little longer in case it is coming straight back.
-            endpoint, seen = _standing_seen.get(ident, (None, 0.0))
-            if not endpoint or (now - seen > STANDING_GRACE and not _port_open(url)):
-                continue
-        claim = spool.control(ident, now=now)
-        spool.write(spool.folder("browsers") / f"{ident}.json", {
-            "schema": spool.SCHEMA, "id": ident, "generation": "standing", "pid": os.getpid(), "profile": profile,
-            "source": ["cdp", url], "keys": [], "session_ids": [], "session_id": "", "endpoint": endpoint, "standing": True,
-            "opened_at": now, "agent_at": 0, "status": "live", "url": None, "busy": 0,
-            "paused": claim["epoch"] if claim else None, "seen_at": now})
+        try:  # one bot's trouble never hides the rest
+            _write_one_standing(profile, home, now)
+        except Exception:  # noqa: BLE001
+            log.debug("dispatch-browser: standing browser for %s skipped", profile, exc_info=True)
+
+
+def _write_one_standing(profile, home, now):
+    url = _standing_url(home)
+    if not url:
+        return
+    ident = spool.standing_id(profile, url)
+    endpoint = _debugger_url(url)
+    if endpoint:
+        _standing_seen[ident] = (endpoint, now)
+    else:
+        # Not answering. A frozen Chrome still holds its port (the phone should hear "not responding", and its
+        # watchdog restarts it); one that is gone is listed a little longer in case it is coming straight back.
+        endpoint, seen = _standing_seen.get(ident, (None, 0.0))
+        if not endpoint or (now - seen > STANDING_GRACE and not _port_open(url)):
+            return
+    claim = spool.control(ident, now=now)
+    spool.write(spool.folder("browsers") / f"{ident}.json", {
+        "schema": spool.SCHEMA, "id": ident, "generation": "standing", "pid": os.getpid(), "profile": profile,
+        "source": ["cdp", url], "keys": [], "session_ids": [], "session_id": "", "endpoint": endpoint, "standing": True,
+        "opened_at": now, "agent_at": 0, "status": "live", "url": None, "busy": 0,
+        "paused": claim["epoch"] if claim else None, "seen_at": now})
 
 
 def _live_records():

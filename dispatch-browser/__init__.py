@@ -38,7 +38,7 @@ def register(ctx):
         # "Pull up a website" means the bot's own browser, which Dispatch shows; not desktop_preview, which opens
         # the page on the person's phone. Optional surfaces: an older Hermes without them still gets the rest.
         if callable(getattr(ctx, "register_system_prompt_section", None)):
-            ctx.register_system_prompt_section("dispatch-browser.web", agent.system_section, max_chars=800)
+            ctx.register_system_prompt_section("dispatch-browser.web", agent.system_section, max_chars=1200)
         ctx.register_hook("pre_llm_call", agent.before_llm)
     except Exception:  # noqa: BLE001 - a broken plugin must never break the agent
         log.warning("dispatch-browser: could not start", exc_info=True)
