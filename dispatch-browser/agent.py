@@ -18,6 +18,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.request
@@ -270,7 +271,29 @@ def _standing() -> str | None:
 def controlled(ident: str | None) -> bool:
     """A person holds, or has asked for, this browser, or this profile's standing browser (the same Chrome, which
     the dashboard lists under its own id)."""
-    return any(i and _spool.control(i) is not None for i in (ident, _standing()))
+    record = _browsers.get(ident) if ident else None
+    standing = _standing_of(record) if record else None
+    return any(i and _spool.control(i) is not None for i in (ident, _standing(), standing))
+
+
+SESSION_PREFIX = "d-"
+
+
+def own_session(args: dict | None) -> str | None:
+    """The Browser Use session a bot's ``browser_exec`` runs in when its browser is its own local Chrome
+    (``browser.cdp_url``). Browser Use keeps one harness daemon per session name, connected to the browser it
+    started with, and every call without a name shares the ``default`` one: with a Chrome per bot, one bot's
+    steps would land in whichever bot's Chrome that daemon found first. Named per profile, each bot keeps its own.
+    A name the bot chose is kept, under its profile's prefix. None leaves the call alone."""
+    source = exec_source()
+    if not source or source[0] != "cdp" or "/devtools/browser/" in source[1] or not source[1].startswith(LOCAL_CDP):
+        return None
+    base = SESSION_PREFIX + re.sub(r"[^A-Za-z0-9_-]", "-", profile_name())[:40]
+    given = str((args or {}).get("session") or "")
+    if given == base or given.startswith(base + "-"):
+        return given
+    name = f"{base}-{given}" if given else base
+    return name if len(name) <= 64 else f"{base}-{hashlib.sha256(given.encode()).hexdigest()[:16]}"
 
 
 def before_tool(tool_name="", args=None, task_id="", session_id="", tool_call_id=None, **_):
@@ -279,8 +302,15 @@ def before_tool(tool_name="", args=None, task_id="", session_id="", tool_call_id
     tells the dashboard the bot has paused, so no call slips in after that promise."""
     if tool_name not in BROWSER_TOOLS or not task_id:
         return None
+    directive = None
     try:
-        key = _session_key(tool_name, args or {}, task_id)
+        args = dict(args or {})
+        if tool_name == BROWSER_EXEC:
+            session = own_session(args)
+            if session and session != args.get("session"):
+                args["session"] = session
+                directive = {"action": "modify", "args": {"session": session}}
+        key = _session_key(tool_name, args, task_id)
         with _lock:
             ident = _keys.get(key)
         if ident is None:
@@ -297,7 +327,7 @@ def before_tool(tool_name="", args=None, task_id="", session_id="", tool_call_id
         _start()
     except Exception:  # noqa: BLE001 - observation must never disturb a browser tool
         log.debug("dispatch-browser: pre_tool_call failed", exc_info=True)
-    return None
+    return directive
 
 
 def after_tool(tool_name="", args=None, result=None, task_id="", session_id="", tool_call_id=None, status="", **_):
@@ -305,7 +335,10 @@ def after_tool(tool_name="", args=None, result=None, task_id="", session_id="", 
     if tool_name not in BROWSER_TOOLS or not task_id:
         return None
     try:
-        key = _session_key(tool_name, args or {}, task_id)
+        args = dict(args or {})
+        if tool_name == BROWSER_EXEC and (session := own_session(args)):
+            args["session"] = session  # the session before_tool gave it, whichever args Hermes hands back
+        key = _session_key(tool_name, args, task_id)
         call = _call_id(tool_call_id, tool_name)
         url = (args or {}).get("url") if tool_name == "browser_navigate" and status != "blocked" else None
         ident = _track(key, session_id, task_id, tool_name, url) if status != "blocked" else None
@@ -331,12 +364,25 @@ def _publish(record: dict) -> None:
 
 def _open_keys(record: dict) -> list[str]:
     """This record's Hermes session keys whose browser is still the one recorded. A browser found through
-    Browser Use's own routes stays open while it is still that route's browser and its port answers."""
+    Browser Use's own routes stays open while its port answers. (Which route a profile uses can't be asked here:
+    the tick thread runs outside any profile, and one process may serve many, so the route is the one the
+    record was made with.)"""
     source = tuple(record["source"])
     if record.get("fallback"):
-        endpoint_now = record.get("endpoint") or source[1]
-        return list(record["keys"]) if exec_source() == source and _reachable(endpoint_now) else []
+        return list(record["keys"]) if _reachable(record.get("endpoint") or source[1]) else []
     return [key for key in record["keys"] if browser_of(_session_info(key)) == source]
+
+
+def _standing_of(record: dict) -> str | None:
+    """The standing listing of the Chrome this record is (the dashboard lists a profile's ``browser.cdp_url``
+    Chrome under its own id), worked out from the record, not from whichever profile this thread is in."""
+    kind, value = record["source"]
+    if kind == "cdp" and str(value).startswith(LOCAL_CDP) and "/devtools/browser/" not in str(value):
+        return _spool.standing_id(record["profile"], value)
+    return None
+
+
+RESOLVE_EVERY = 5.0  # seconds between checks that a discovery-root Chrome is still the same browser
 
 
 def tick(now: float | None = None) -> None:
@@ -369,8 +415,15 @@ def tick(now: float | None = None) -> None:
             continue
         with _lock:  # _track may be adding a key meanwhile: drop only the closed ones
             record["keys"] = [key for key in record["keys"] if key in keys or key not in original]
-        if not record.get("endpoint") or not _reachable(record["endpoint"]):  # a restarted Chrome moves ports
+        kind, value = record["source"]
+        rediscover = kind == "cdp" and "/devtools/browser/" not in value and now - float(record.get("resolved_at") or 0) >= RESOLVE_EVERY
+        if not record.get("endpoint") or rediscover or not _reachable(record["endpoint"]):
+            # A restarted Chrome moves ports, or (a standing Chrome its watchdog restarted) keeps its port under a
+            # new browser id. One that doesn't answer right now keeps the endpoint it had.
+            record["resolved_at"] = now
             found = endpoint(tuple(record["source"]))
+            if found is None and rediscover and _reachable(record.get("endpoint") or ""):
+                found = record["endpoint"]
             if found != record.get("endpoint"):
                 record.update(endpoint=found, dirty=True)
         with _lock:
@@ -380,7 +433,7 @@ def tick(now: float | None = None) -> None:
             claim = _spool.control(ident, now=now)
             paused = claim["epoch"] if claim is not None and busy == 0 else None
             if record.get("fallback") or record.get("shared"):  # a claim made on the standing listing
-                standing = _standing()
+                standing = _standing_of(record)
                 held = _spool.control(standing, now=now) if standing else None
                 if held is not None and claim is None:
                     paused = held["epoch"] if busy == 0 else None

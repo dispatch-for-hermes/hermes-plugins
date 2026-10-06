@@ -8,15 +8,17 @@ server → phone
              call is finishing) or ``person``. ``ask`` is the bot's ``browser_ask_user`` reason, or null.
 - ``frame``  ``{seq, tab, epoch, width, height, image: "data:image/jpeg;base64,…"}``; width/height are the page's
              CSS viewport the image shows, so the phone maps a tap to page coordinates as fractions.
-- ``ended``  ``{reason: "closed" | "stopped" | "error"}``, then the socket closes.
+- ``ended``  ``{reason: "closed" | "stopped" | "unresponsive" | "error"}``, then the socket closes (``unresponsive``:
+             the browser's Chrome didn't answer; the phone tries again).
 - ``error``  ``{message}`` (a refused request; the stream goes on).
 - ``ping``
 
 phone → server
 - ``ack {seq}`` once a frame is on screen. At most ``IN_FLIGHT`` frames wait for an ack; until then Chrome's own
   frame ack is held, so Chrome slows to what the connection carries. Size and quality step down on slow acks.
-- ``view {width, height, scale}`` its stage in CSS pixels and its pixel density. While this viewer holds the
-  browser, the page is laid out at that size (a phone-sized viewport), and back at its own once given back. ``tab {id}`` watch one tab; ``follow`` follow the bot's tab.
+- ``view {width, height, scale}`` the size it draws the page at, in CSS pixels (its stage, times its zoom), and its
+  pixel density: frames are sized to match. The page keeps the bot's own layout, held or not (a phone-sized
+  viewport would switch sites to their mobile layout). ``tab {id}`` watch one tab; ``follow`` follow the bot's tab.
 - ``take`` / ``give`` ask for / hand back the browser. While this viewer holds it (state ``person``, matching
   ``epoch``): ``move {x, y}`` (the phone's pointer moved; hover), ``tap {x, y}`` (a click), ``down`` / ``up {x, y}``
   (a drag), ``scroll {x, y, dy, dx}`` (x, y as 0–1 fractions of the frame; dy, dx in page pixels), ``text {text}``,
@@ -32,6 +34,7 @@ PROTOCOL = 3
 IN_FLIGHT = 2
 PING_EVERY = 10.0
 CLAIM_SECONDS = 120.0
+QUIET_CHECK = 3.0  # seconds without a frame before checking that Chrome still answers
 STILL_AFTER = 1.5        # no screencast frame for this long: send a still instead
 GRACE = 2.0              # a request waits at least this long for the bots' pause promises (agents publish each second)   # a held browser stays held this long after its viewer drops (switching apps for a code)
 RENEW_EVERY = 5.0
@@ -84,9 +87,7 @@ class Viewer:
         self.seq = 0
         self.level = 1
         self.view = (0, 0)      # the phone's stage in device pixels (screencast size caps)
-        self.css = (0, 0, 1.0)  # the phone's stage in CSS pixels and its density (the held page's viewport)
-        self.emulated = None    # the viewport override applied to the attached tab, or None
-        self.bot_view = None    # the bot's own viewport (CSS px) before a held page took the phone's size
+        self.css = (0, 0, 1.0)  # the phone's stage in CSS pixels and its density
         self.rtt = None
         self.quick = 0
         self.wake = asyncio.Event()
@@ -102,6 +103,7 @@ class Viewer:
         self.next_move = None   # the newest pointer move not yet sent to the page
         self.framed_at = 0.0    # when a frame last went to the phone
         self.stilled_at = 0.0   # when a fallback still was last taken
+        self.checked_chrome = 0.0  # when a quiet Chrome was last asked whether it still answers
         self.pressed = False    # a drag holds the page's left button
         self.at = None          # where the page's pointer is (CSS px)
 
@@ -214,8 +216,12 @@ class Viewer:
             control = {"state": "bot", "mine": False, "epoch": None}
         else:
             control = {"state": "person" if claim["state"] == "controlled" else "waiting", "mine": mine, "epoch": claim["epoch"]}
-        ask = self.spool.read(self.spool.folder("asks") / f"{self.record['id']}.json")
-        reason = ask.get("reason") if ask and float(ask.get("expires_at") or 0) > time.time() else None
+        reason = None
+        for ident in self.siblings(self.record):  # a bot asks on its own record; the phone may watch the standing one
+            ask = self.spool.read(self.spool.folder("asks") / f"{ident}.json")
+            reason = ask.get("reason") if ask and float(ask.get("expires_at") or 0) > time.time() else None
+            if isinstance(reason, str):
+                break
         return {"type": "state", "protocol": PROTOCOL, "browser": public(self.record), "tabs": [dict(t) for t in self.tabs], "tab": self.tab,
                 "follow": self.follow, "control": control, "ask": reason if isinstance(reason, str) else None}
 
@@ -361,52 +367,7 @@ class Viewer:
         return {"format": "jpeg", "quality": quality, "everyNthFrame": 1,
                 "maxWidth": min(cap, width) if width else cap, "maxHeight": min(cap, height) if height else cap}
 
-    async def _inner(self):
-        result = await self.cdp.call("Runtime.evaluate", {"expression": "[innerWidth, innerHeight]", "returnByValue": True},
-                                     self.session, timeout=3)
-        width, height = result["result"]["value"]
-        return int(width), int(height)
-
-    async def _unfit(self):
-        """Back to the bot's own viewport. Chrome keeps one viewport override per page: setting ours replaced the
-        bot's (Playwright's 1280x720), and clearing ours, or detaching, leaves the bare window. So the window is
-        resized to the viewport the bot had, which outlasts this connection."""
-        await self.cdp.call("Emulation.clearDeviceMetricsOverride", {}, self.session, timeout=3)
-        if not self.bot_view:
-            return
-        width, height = await self._inner()
-        dw, dh = self.bot_view[0] - width, self.bot_view[1] - height
-        if dw or dh:
-            window = await self.cdp.call("Browser.getWindowForTarget", {"targetId": self.attached}, timeout=3)
-            bounds = window.get("bounds") or {}
-            await self.cdp.call("Browser.setWindowBounds", {"windowId": window["windowId"], "bounds": {
-                "width": int(bounds.get("width") or width) + dw, "height": int(bounds.get("height") or height) + dh}}, timeout=3)
-
-    async def _fit(self):
-        """A held page takes the phone's size; anyone else's view of it, and a page given back, the bot's."""
-        want = None
-        if self.session and self._holding() and self.css[0] >= 200 and self.css[1] >= 200:
-            want = {"width": self.css[0], "height": self.css[1], "deviceScaleFactor": self.css[2], "mobile": True}
-        if want == self.emulated:
-            return
-        try:
-            if want:
-                if self.emulated is None:
-                    self.bot_view = await self._inner()
-                await self.cdp.call("Emulation.setDeviceMetricsOverride", want, self.session, timeout=3)
-            elif self.session:
-                await self._unfit()
-            self.emulated = want
-        except Exception:  # noqa: BLE001 - tried again on the next pass
-            pass
-
     async def _attach(self, target):
-        if self.emulated and self.session:  # the tab being left gets the bot's viewport back first
-            try:
-                await self._unfit()
-            except Exception:  # noqa: BLE001 - it may already be gone
-                pass
-        self.emulated = self.bot_view = None  # an override belongs to the session and tab it was set on
         if self.session:
             old, self.session = self.session, None
             self.pending = None
@@ -520,7 +481,20 @@ class Viewer:
                 self.wake.clear()
                 now = time.monotonic()
                 if self.cdp.closed.is_set() and not self.ended:
-                    self.ended = self._still_open() or "closed"
+                    # Chrome dropped this connection. Gone for good, or restarting (the watchdog ends a frozen
+                    # one): the phone comes back to whichever it finds.
+                    self.ended = self._still_open()
+                    if not self.ended:
+                        raise Unresponsive("browser connection closed")
+                if now - self.framed_at > QUIET_CHECK and now - self.checked_chrome > QUIET_CHECK:
+                    # No frame for a while: a still page, or a Chrome that stopped answering. Ask it something cheap.
+                    self.checked_chrome = now
+                    try:
+                        await self.cdp.call("Browser.getVersion", timeout=4)
+                    except asyncio.TimeoutError as error:
+                        raise Unresponsive("no answer") from error
+                    except self.cdp_module.CdpError:
+                        pass  # closed: handled on the next pass
                 if now - checked >= 1.0:
                     checked = now
                     refreshed = self.refresh()
@@ -548,8 +522,6 @@ class Viewer:
                         if self.tab is None:
                             self.ended = "closed"
                         continue
-                if now - self.restart_at > 0.3:
-                    await self._fit()
                 if self.session and self._params() != self.params and now - self.restart_at > 0.3:
                     self.params = self._params()
                     try:  # Chrome refuses a second start while one runs
@@ -585,11 +557,6 @@ class Viewer:
             await self._lift()
             if self.ended:  # nothing left to hold
                 self._release()
-            if self.emulated and self.session and not self.cdp.closed.is_set():
-                try:
-                    await self._unfit()
-                except Exception:  # noqa: BLE001
-                    pass
             await self.cdp.close()
 
     async def _run_actions(self):
