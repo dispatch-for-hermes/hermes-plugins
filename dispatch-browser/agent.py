@@ -505,6 +505,38 @@ ASK_SCHEMA = {
 }
 
 
+GUIDANCE = (
+    "Your web browser and Dispatch: when the user asks you to open, pull up, show, look at or browse a website, "
+    "use your own browser tools (browser_exec, or browser_navigate and the other browser_* tools). The user watches "
+    "your browser live in the Dispatch app (Watch Browser) and can take it over. desktop_preview is a different "
+    "thing: it opens a page on the user's own screen (in Dispatch, their phone's in-app browser) and you can't act "
+    "in it; use it only when they ask to see something on their phone or screen. When a page needs the user "
+    "themself (a sign-in, a one-time code, a CAPTCHA, approving a purchase), call browser_ask_user."
+)
+BROWSING = __import__("re").compile(
+    r"\b(browser|web ?site|web ?page|pull (it |that |this |something )?up|open (up )?(the |a |that |this |your )?(site|page|link|url|tab)s?\b|go to|navigate|look (it )?up|"
+    r"google|search the web|https?://|www\.)|\b[a-z0-9-]+\.(com|org|net|io|dev|ai|co|app)\b", __import__("re").I)
+NUDGE = ("(Dispatch: for websites use your own browser tools, which the user can watch and take over in Watch Browser; "
+         "desktop_preview would open the page on the user's phone instead.)")
+
+
+def system_section(_session=None) -> str:
+    """Frozen into each new session's prompt (Hermes' supported plugin prompt section)."""
+    return GUIDANCE if ask_available() else ""
+
+
+def before_llm(user_message=None, **_):
+    """``pre_llm_call``: a one-line reminder on turns that talk about browsing, so chats that began before the
+    plugin was installed get the same steer. Never on other turns."""
+    try:
+        text = user_message if isinstance(user_message, str) else str(user_message or "")
+        if text and BROWSING.search(text[:4000]) and ask_available():
+            return {"context": NUDGE}
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def ask_available() -> bool:
     try:
         return not problems()
