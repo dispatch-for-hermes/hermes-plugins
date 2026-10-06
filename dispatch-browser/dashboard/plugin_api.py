@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 log = logging.getLogger("dispatch-browser")
 _ROOT = Path(__file__).parents[1]
-VERSION = "3.1.0"
+VERSION = "3.1.1"
 RETAIN_ENDED = 120.0
 MAX_VIEWERS = 8
 VIEWER_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -301,9 +301,12 @@ async def watch(ws: WebSocket, ident: str):
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     except Exception as error:  # noqa: BLE001
+        if ws.client_state.name != "CONNECTED" or ws.application_state.name != "CONNECTED":
+            log.debug("dispatch-browser: the phone left %s mid-send", ident)  # nobody left to tell
+            return
         # A Chrome that doesn't answer (busy, frozen or restarting) is the browser's trouble, not the stream's:
         # the phone says so and keeps trying.
-        unresponsive = isinstance(error, (TimeoutError, asyncio.TimeoutError, OSError))
+        unresponsive = isinstance(error, (stream.Unresponsive, TimeoutError, asyncio.TimeoutError, OSError))
         log.log(logging.INFO if unresponsive else logging.WARNING, "dispatch-browser: stream for %s ended: %s",
                 ident, type(error).__name__, exc_info=not unresponsive)
         try:

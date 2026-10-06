@@ -61,6 +61,10 @@ def public(record: dict, now: float | None = None) -> dict:
             "active": busy > 0 or (agent_at > 0 and now - agent_at < ACTIVE_FOR)}
 
 
+class Unresponsive(Exception):
+    """The browser's Chrome didn't answer (busy, frozen or restarting)."""
+
+
 class Viewer:
     """One phone watching one browser."""
 
@@ -488,7 +492,10 @@ class Viewer:
         current = self._control()
         if current and current.get("viewer") == viewer_id:  # a phone coming back to a browser it still holds
             self.claim = current
-        self.cdp = await self.cdp_module.Cdp().connect(self.record["endpoint"])
+        try:
+            self.cdp = await self.cdp_module.Cdp().connect(self.record["endpoint"])
+        except Exception as error:  # noqa: BLE001 - refused, timed out or a bad handshake: Chrome isn't answering
+            raise Unresponsive(type(error).__name__) from error
         self.cdp.listeners.append(self.on_event)
         reader = actor = None
         try:
