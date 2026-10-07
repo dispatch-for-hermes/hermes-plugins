@@ -52,6 +52,12 @@ MISSES = 4              # missed probes in a row before a Chrome is called froze
 START_GRACE = 30.0      # a Chrome this young is still starting
 READY_WAIT = 15.0       # ensure() waits this long for a Chrome it started
 MAX_BACKOFF = 300.0
+# On macOS a headless Chrome that has run for many hours freezes on the first real keystroke (its main thread stalls in
+# AppKit's key handling, waiting on the window server); a fresh one types fine. So a bot's Chrome is started afresh
+# once it is this old, or older than the Chrome installed on disk, but only while nobody uses it (tabs.py brings its
+# pages back; sign-ins live in the profile).
+REFRESH_AGE = 3600.0
+REFRESH_IDLE = 600.0
 WINDOW = "1280,800"
 LOCAL = re.compile(r"^(?:http|ws)://(?:127\.0\.0\.1|localhost|\[::1\]):(\d{2,5})/?$")
 LOOPBACK_FIXED = re.compile(r"^ws://(?:127\.0\.0\.1|localhost|\[::1\]):\d+/devtools/browser/")  # one browser, by id
@@ -422,6 +428,37 @@ def chrome_binary() -> str | None:
 
 
 _versions: dict = {}
+_installed: dict = {}
+
+
+def installed_version() -> str | None:
+    """The version of the Chrome on disk (it updates itself while bot Chromes keep running the old one)."""
+    binary = chrome_binary()
+    if not binary:
+        return None
+    try:
+        stamp = os.stat(binary).st_mtime
+        app = Path(binary).parents[2]
+        stamp = max(stamp, os.stat(app / "Contents" / "Info.plist").st_mtime) if (app / "Contents").is_dir() else stamp
+    except OSError:
+        return None
+    if _installed.get(binary, (None, None))[0] != stamp:
+        try:
+            out = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=10).stdout
+            _installed[binary] = (stamp, re.search(r"(\d+\.\d+\.\d+\.\d+)", out).group(1))
+        except Exception:  # noqa: BLE001
+            return None
+    return _installed[binary][1]
+
+
+def running_version(port: int) -> str | None:
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
+                f"{local_url(port)}/json/version", timeout=3) as response:  # noqa: S310 - loopback only
+            found = re.search(r"(\d+\.\d+\.\d+\.\d+)", json.loads(response.read(65536)).get("Browser") or "")
+        return found.group(1) if found else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def user_agent(binary: str) -> str:
@@ -627,6 +664,7 @@ class Supervisor:
         self.statuses: dict[str, dict] = {}
         self.thread = None
         self.lock = None
+        self.idle_for = None  # profile -> seconds nobody has used its browser (0 while in use); set by the dashboard
 
     def pass_once(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
@@ -695,6 +733,10 @@ class Supervisor:
             if state.get("status") != status or (mine and state.get("pid") != mine[0]):
                 state = {**state, "status": status, "pid": mine[0] if mine else state.get("pid"), "error": None}
                 write_state(self.root, profile, state)
+            if status == "ready" and mine and self.stale(profile, mine[0], port, now):
+                end(mine[0], folder)
+                result = start(self.root, profile, home, port, url, now)
+                return {"profile": profile, "status": result.get("status") or "starting", "port": port}
             return {"profile": profile, "status": status, "port": port}
         if mine:
             if now - float(state.get("launched_at") or 0) < START_GRACE:
@@ -719,6 +761,29 @@ class Supervisor:
         self.launched[profile], self.answered[profile] = True, False
         result = start(self.root, profile, home, port, url, now)
         return {"profile": profile, "status": result.get("status") or "starting", "port": port, "error": result.get("error")}
+
+    def stale(self, profile: str, pid: int, port: int, now: float) -> bool:
+        """Time to start this bot's Chrome afresh: old (or older than the installed Chrome) and unused for a while."""
+        if self.idle_for is None:
+            return False
+        try:
+            import psutil
+            age = now - psutil.Process(pid).create_time()
+        except Exception:  # noqa: BLE001
+            return False
+        outdated = installed_version() not in (None, running_version(port))
+        if age < REFRESH_AGE and not outdated:
+            return False
+        try:
+            idle = self.idle_for(profile)
+        except Exception:  # noqa: BLE001
+            return False
+        if idle < REFRESH_IDLE:
+            return False
+        log.info("hermes-hq-browser: starting %s's Chrome afresh (%s, %s)", profile,
+                 "a newer Chrome is installed" if outdated else f"running {age / 3600:.1f} h",
+                 "never used since the dashboard started" if idle == float("inf") else f"unused for {idle / 60:.0f} min")
+        return True
 
     def run(self) -> None:
         while True:

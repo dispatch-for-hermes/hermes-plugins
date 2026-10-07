@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 log = logging.getLogger("hermes-hq-browser")
 _ROOT = Path(__file__).parents[1]
-VERSION = "3.4.2"
+VERSION = "3.4.3"
 RETAIN_ENDED = 120.0
 MAX_VIEWERS = 8
 VIEWER_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -57,10 +57,36 @@ def _supervise():
         return
     try:
         supervisor = fleet.Supervisor(fleet.hermes_root(), _ROOT)
+        supervisor.idle_for = _idle_for
         if supervisor.begin():
             _supervisor = supervisor
     except Exception:  # noqa: BLE001 - watching still works without it
         log.warning("hermes-hq-browser: couldn't start looking after the bots' Chromes", exc_info=True)
+
+
+_watching: dict = {}  # profile -> phones watching its browser right now
+
+
+def _idle_for(profile) -> float:
+    """Seconds since anyone used this bot's browser: 0 while a call runs, a person holds or was asked for it, or a
+    phone watches it. The supervisor starts an old Chrome afresh only once this is long enough."""
+    now = time.time()
+    if _watching.get(profile):
+        return 0.0
+    last = 0.0
+    for ident, record in spool.entries("browsers"):
+        if record.get("profile") != profile or not spool.live(record, now):
+            continue
+        ask = spool.read(spool.folder("asks") / f"{ident}.json")
+        if (int(record.get("busy") or 0) > 0 or spool.control(ident, now=now) is not None
+                or (ask and float(ask.get("expires_at") or 0) > now)):
+            return 0.0
+        last = max(last, float(record.get("agent_at") or 0))
+    home = dict(_profile_homes()).get(profile)
+    url = _standing_url(home) if home else None
+    if url:
+        last = max(last, tracker.last_used(url))
+    return now - last if last else float("inf")
 
 
 _supervise()
@@ -398,6 +424,8 @@ async def watch(ws: WebSocket, ident: str):
     chrome = str(source[1]) if len(source) == 2 and source[0] == "cdp" and "/devtools/browser/" not in str(source[1]) else ""
     viewer = stream.Viewer(spool, cdp, record, ws.send_json, _siblings, _standing_async,
                            recent=(lambda: tracker.recent(chrome)) if chrome else None)
+    watched = record.get("profile")
+    _watching[watched] = _watching.get(watched, 0) + 1  # an old Chrome isn't started afresh under a watching phone
     try:
         await viewer.run(receive, viewer_id)
     except (WebSocketDisconnect, asyncio.CancelledError):
@@ -417,6 +445,7 @@ async def watch(ws: WebSocket, ident: str):
             pass
     finally:
         _viewers -= 1
+        _watching[watched] = max(0, _watching.get(watched, 1) - 1)
         try:
             await ws.close()
         except Exception:  # noqa: BLE001
@@ -433,7 +462,26 @@ def _track_tabs():
                     tracker.watch(url)
         except Exception:  # noqa: BLE001
             log.debug("hermes-hq-browser: tab tracking setup failed", exc_info=True)
+        _dump_stacks_if_asked()
         time.sleep(15)
+
+
+def _dump_stacks_if_asked():
+    """Support aid: touching <hermes root>/<spool>/dump-stacks writes every thread's stack beside it."""
+    try:
+        trigger = spool.root() / "dump-stacks"
+        if not trigger.exists():
+            return
+        trigger.unlink()
+        import traceback
+        names = {t.ident: t.name for t in threading.enumerate()}
+        lines = []
+        for ident, frame in sys._current_frames().items():
+            lines.append(f"--- {names.get(ident, ident)}")
+            lines.extend(traceback.format_stack(frame))
+        (spool.root() / "stacks.txt").write_text("".join(lines))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 if fleet.setting("OWN_CHROME", "1") != "0":

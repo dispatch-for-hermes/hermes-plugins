@@ -1,5 +1,5 @@
 name: dispatch-browser
-version: "3.3.5"
+version: "3.3.7"
 manifest_version: 2
 kind: standalone
 description: "Watch a bot's browser live from Dispatch and take it over. Bots keep all their browser tools; they can hand you their browser with browser_ask_user."
