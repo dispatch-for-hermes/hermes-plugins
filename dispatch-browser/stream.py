@@ -76,8 +76,9 @@ class Unresponsive(Exception):
 class Viewer:
     """One phone watching one browser."""
 
-    def __init__(self, spool, cdp, record: dict, send_text, siblings=None, refresh=None):
+    def __init__(self, spool, cdp, record: dict, send_text, siblings=None, refresh=None, recent=None):
         self.spool, self.cdp_module, self.record = spool, cdp, record
+        self.recent = recent or (lambda: [])  # tab ids, the one the bot used most recently first (tabs.py)
         self.send_text = send_text
         self.refresh = refresh or (lambda: None)  # keeps the dashboard's own (standing) records current
         self.siblings = siblings or (lambda record: [record["id"]])  # every published copy of this browser
@@ -436,11 +437,18 @@ class Viewer:
                               "image": "data:image/jpeg;base64," + data})
 
     def _first_tab(self):
-        """The tab the bot last opened a page in, else its newest tab with a page in it, else any."""
+        """The tab the bot used last (opened, or moved to a new address in), else the one it last opened a page in,
+        else its newest tab with a page in it, else any. Empty tabs only when there is nothing else."""
+        pages = {t["id"]: t for t in self.tabs if not blank(t["url"])}
+        try:
+            used = next((tab for tab in self.recent() if tab in pages), None)
+        except Exception:  # noqa: BLE001
+            used = None
+        if used:
+            return used
         url = self.record.get("url")
         match = [t for t in self.tabs if url and t["url"] == url]
-        pages = [t for t in self.tabs if not blank(t["url"])]
-        return (match or pages or self.tabs or [{"id": None}])[-1]["id"]
+        return (match or list(pages.values()) or self.tabs or [{"id": None}])[-1]["id"]
 
     def _still_open(self):
         """None while the owner vouches for the browser; why it ended once it is gone (two misses in a row,

@@ -465,9 +465,13 @@ def chrome_processes() -> list[tuple[int, str, int | None]]:
     except ImportError:
         return []
     found = []
-    for process in psutil.process_iter(["pid", "cmdline"]):
-        try:
-            arguments = process.info.get("cmdline") or []
+    try:
+        processes = list(psutil.process_iter())
+    except Exception:  # noqa: BLE001
+        return []
+    for process in processes:
+        try:  # macOS can refuse one process's arguments with a bare PermissionError: skip that one, not the pass
+            arguments = process.cmdline() or []
         except Exception:  # noqa: BLE001
             continue
         if not arguments or any(a.startswith("--type=") for a in arguments):
@@ -475,7 +479,7 @@ def chrome_processes() -> list[tuple[int, str, int | None]]:
         folder = next((a.split("=", 1)[1] for a in arguments if a.startswith("--user-data-dir=")), None)
         port = next((a.split("=", 1)[1] for a in arguments if a.startswith("--remote-debugging-port=")), None)
         if folder:
-            found.append((process.info["pid"], str(Path(folder).expanduser()), int(port) if port and port.isdigit() else None))
+            found.append((process.pid, str(Path(folder).expanduser()), int(port) if port and port.isdigit() else None))
     return found
 
 

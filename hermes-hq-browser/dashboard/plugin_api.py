@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 log = logging.getLogger("hermes-hq-browser")
 _ROOT = Path(__file__).parents[1]
-VERSION = "3.4.0"
+VERSION = "3.4.2"
 RETAIN_ENDED = 120.0
 MAX_VIEWERS = 8
 VIEWER_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -42,6 +42,8 @@ spool = _load("spool")
 cdp = _load("cdp")
 stream = _load("stream")
 fleet = _load("fleet")
+tabs = _load("tabs")
+tracker = tabs.Tracker(cdp)
 router = APIRouter()
 _viewers = 0
 _supervisor = None
@@ -178,6 +180,7 @@ def _copied(profile, url, homes) -> bool:
 
 
 def _write_one_standing(profile, url, now):
+    tracker.watch(url)  # which tab the bot uses, from now on (tabs.py)
     ident = spool.standing_id(profile, url)
     endpoint = _debugger_url(url)
     if endpoint:
@@ -391,7 +394,10 @@ async def watch(ws: WebSocket, ident: str):
             viewer_id = hello["viewer"]
     except (asyncio.TimeoutError, ValueError):
         pass
-    viewer = stream.Viewer(spool, cdp, record, ws.send_json, _siblings, _standing_async)
+    source = record.get("source") or []
+    chrome = str(source[1]) if len(source) == 2 and source[0] == "cdp" and "/devtools/browser/" not in str(source[1]) else ""
+    viewer = stream.Viewer(spool, cdp, record, ws.send_json, _siblings, _standing_async,
+                           recent=(lambda: tracker.recent(chrome)) if chrome else None)
     try:
         await viewer.run(receive, viewer_id)
     except (WebSocketDisconnect, asyncio.CancelledError):
@@ -415,3 +421,20 @@ async def watch(ws: WebSocket, ident: str):
             await ws.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+def _track_tabs():
+    """Follow every bot's Chrome from the start, phone or not, so the tab a bot used is known when someone looks."""
+    while True:
+        try:
+            for _, home in _profile_homes():
+                url = _standing_url(home)
+                if url:
+                    tracker.watch(url)
+        except Exception:  # noqa: BLE001
+            log.debug("hermes-hq-browser: tab tracking setup failed", exc_info=True)
+        time.sleep(15)
+
+
+if fleet.setting("OWN_CHROME", "1") != "0":
+    threading.Thread(target=_track_tabs, name="hermes-hq-browser-track", daemon=True).start()

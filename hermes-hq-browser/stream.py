@@ -64,6 +64,11 @@ def public(record: dict, now: float | None = None) -> dict:
             "active": busy > 0 or (agent_at > 0 and now - agent_at < ACTIVE_FOR)}
 
 
+def blank(url) -> bool:
+    """A tab with nothing in it yet (a bot's browser often keeps one beside the page it works in)."""
+    return str(url or "") in ("", "about:blank") or str(url).startswith(("chrome://newtab", "chrome://new-tab-page"))
+
+
 class Unresponsive(Exception):
     """The browser's Chrome didn't answer (busy, frozen or restarting)."""
 
@@ -71,8 +76,9 @@ class Unresponsive(Exception):
 class Viewer:
     """One phone watching one browser."""
 
-    def __init__(self, spool, cdp, record: dict, send_text, siblings=None, refresh=None):
+    def __init__(self, spool, cdp, record: dict, send_text, siblings=None, refresh=None, recent=None):
         self.spool, self.cdp_module, self.record = spool, cdp, record
+        self.recent = recent or (lambda: [])  # tab ids, the one the bot used most recently first (tabs.py)
         self.send_text = send_text
         self.refresh = refresh or (lambda: None)  # keeps the dashboard's own (standing) records current
         self.siblings = siblings or (lambda record: [record["id"]])  # every published copy of this browser
@@ -119,8 +125,8 @@ class Viewer:
         info = params.get("targetInfo") or {}
         if method == "Target.targetCreated" and info.get("type") == "page":
             self._upsert(info)
-            if self.follow and not self._holding():
-                self.tab = str(info.get("targetId"))
+            if self.follow and not self._holding() and not blank(info.get("url")):
+                self.tab = str(info.get("targetId"))  # an empty new tab is followed once it opens a page
         elif method == "Target.targetInfoChanged" and info.get("type") == "page":
             before = next((t for t in self.tabs if t["id"] == info.get("targetId")), None)
             self._upsert(info)
@@ -131,7 +137,7 @@ class Viewer:
             self.tabs = [t for t in self.tabs if t["id"] != gone]
             self.changed = True
             if self.tab == gone:
-                self.tab = self.tabs[-1]["id"] if self.tabs else None
+                self.tab = self._first_tab()
                 if self.tab is None:
                     self.ended = "closed"
         elif method in ("Inspector.detached", "Target.detachedFromTarget"):
@@ -431,9 +437,18 @@ class Viewer:
                               "image": "data:image/jpeg;base64," + data})
 
     def _first_tab(self):
+        """The tab the bot used last (opened, or moved to a new address in), else the one it last opened a page in,
+        else its newest tab with a page in it, else any. Empty tabs only when there is nothing else."""
+        pages = {t["id"]: t for t in self.tabs if not blank(t["url"])}
+        try:
+            used = next((tab for tab in self.recent() if tab in pages), None)
+        except Exception:  # noqa: BLE001
+            used = None
+        if used:
+            return used
         url = self.record.get("url")
         match = [t for t in self.tabs if url and t["url"] == url]
-        return (match or self.tabs or [{"id": None}])[-1]["id"]
+        return (match or list(pages.values()) or self.tabs or [{"id": None}])[-1]["id"]
 
     def _still_open(self):
         """None while the owner vouches for the browser; why it ended once it is gone (two misses in a row,
