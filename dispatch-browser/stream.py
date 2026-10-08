@@ -3,9 +3,14 @@
 Wire format (text JSON both ways, one websocket per viewer):
 
 server → phone
-- ``state``  ``{browser, tabs, tab, follow, control: {state, mine, epoch}, ask}`` on open and whenever any of it changes.
-             ``control.state`` is ``bot`` (the bot drives), ``waiting`` (a person asked; the bot's running browser
-             call is finishing) or ``person``. ``ask`` is the bot's ``browser_ask_user`` reason, or null.
+- ``state``  ``{browser, tabs, tab, follow, control: {state, mine, epoch}, ask, field}`` on open and whenever any of it
+             changes. ``control.state`` is ``bot`` (the bot drives), ``waiting`` (a person asked; the bot's running
+             browser call is finishing) or ``person``. ``ask`` is the bot's ``browser_ask_user`` reason, or null.
+             ``field`` (while this viewer holds the browser) ``{under, focus}``: the kind of text field under the
+             pointer and the one with the page's focus (``password``, ``username``, ``code``, ``email``, ``tel``,
+             ``url``, ``number``, ``search``, ``text``, ``multiline``), or null: the phone raises a matching keyboard
+             (a password field gets the phone's password AutoFill: Passwords, 1Password).
+- ``copied`` ``{text}`` the page's selected text, answering ``copy``.
 - ``frame``  ``{seq, tab, epoch, width, height, image: "data:image/jpeg;base64,…"}``; width/height are the page's
              CSS viewport the image shows, so the phone maps a tap to page coordinates as fractions.
 - ``ended``  ``{reason: "closed" | "stopped" | "unresponsive" | "error"}``, then the socket closes (``unresponsive``:
@@ -22,7 +27,8 @@ phone → server
 - ``take`` / ``give`` ask for / hand back the browser. While this viewer holds it (state ``person``, matching
   ``epoch``): ``move {x, y}`` (the phone's pointer moved; hover), ``tap {x, y}`` (a click), ``down`` / ``up {x, y}``
   (a drag), ``scroll {x, y, dy, dx}`` (x, y as 0–1 fractions of the frame; dy, dx in page pixels), ``text {text}``,
-  ``key {key}``, ``go {url}``, ``nav {action}``, each with the ``epoch``. Only the newest pointer move waits.
+  ``key {key}``, ``go {url}``, ``nav {action}``, ``copy`` (the selection, answered with ``copied``), ``select_all``,
+  each with the ``epoch``. Only the newest pointer move waits. Taps close together are a double (or triple) click.
 """
 from __future__ import annotations
 
@@ -48,6 +54,56 @@ KEYS = {  # key -> (code, windowsVirtualKeyCode, text)
     "PageUp": ("PageUp", 33, ""), "PageDown": ("PageDown", 34, ""), " ": ("Space", 32, " "),
 }
 
+
+MULTI_CLICK = 0.5   # taps this close (seconds, and FIELD_SLOP px) count as a double or triple click
+CLICK_SLOP = 8.0
+# Which text field a point (``"point"``) or the focus (``"focus"``) is in, or the selected text (``"selection"``).
+# Same-origin frames and shadow roots are followed here; a cross-origin frame is returned as its element, and the
+# dashboard goes inside it (its own target, or an isolated world).
+PROBE = r"""(function (mode, x, y) {
+  const SKIP = new Set(['button', 'submit', 'checkbox', 'radio', 'file', 'image', 'reset', 'range', 'color', 'hidden'])
+  let doc = document, el = null
+  for (let depth = 0; depth < 6; depth++) {
+    el = mode === 'point' ? doc.elementFromPoint(x, y) : doc.activeElement
+    for (let i = 0; el && el.shadowRoot && i < 6; i++) {
+      const inner = mode === 'point' ? el.shadowRoot.elementFromPoint(x, y) : el.shadowRoot.activeElement
+      if (!inner || inner === el) break
+      el = inner
+    }
+    if (el && (el.tagName === 'IFRAME' || el.tagName === 'FRAME')) {
+      const box = el.getBoundingClientRect()
+      let inner = null
+      try { inner = el.contentDocument } catch (e) {}
+      if (!inner) return el
+      doc = inner; x -= box.left + el.clientLeft; y -= box.top + el.clientTop
+      continue
+    }
+    break
+  }
+  if (mode === 'selection') {
+    if (el && el.tagName === 'INPUT' && el.type === 'password') return JSON.stringify({text: ''})
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.selectionEnd > el.selectionStart)
+      return JSON.stringify({text: el.value.slice(el.selectionStart, el.selectionEnd)})
+    return JSON.stringify({text: String(doc.getSelection ? doc.getSelection() : '')})
+  }
+  if (el && mode === 'point' && !(el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
+    const label = el.closest && el.closest('label')
+    if (label && label.control) el = label.control
+  }
+  if (!el || el.disabled || el.readOnly) return 'null'
+  const editable = el.isContentEditable || el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && !SKIP.has((el.type || '').toLowerCase()))
+  if (!editable) return 'null'
+  const type = (el.type || '').toLowerCase(), auto = (el.getAttribute('autocomplete') || '').toLowerCase()
+  const hint = [el.name, el.id, el.getAttribute('aria-label'), el.getAttribute('placeholder'), auto].join(' ').toLowerCase()
+  let kind = el.tagName === 'INPUT' ? 'text' : 'multiline'
+  if (type === 'password' || /(current|new)-password/.test(auto)) kind = 'password'
+  else if (el.tagName === 'INPUT' && (auto.includes('one-time-code') || /\b(otp|one[-_ ]?time|verification|verify|2fa|mfa|totp|passcode|security[-_ ]?code|auth[-_ ]?code)\b/.test(hint))) kind = 'code'
+  else if (el.tagName === 'INPUT' && (auto.includes('username') || /\b(user(name)?|login|account)\b/.test(hint))) kind = 'username'
+  else if (type === 'email' || auto.includes('email')) kind = 'email'
+  else if (['tel', 'url', 'number', 'search'].includes(type)) kind = type
+  return JSON.stringify(kind)
+})"""
+FIELD_KINDS = {"password", "username", "code", "email", "tel", "url", "number", "search", "text", "multiline"}
 
 ACTIVE_FOR = 90.0  # a bot's browser counts as in use this long after its last browser tool
 
@@ -112,6 +168,8 @@ class Viewer:
         self.checked_chrome = 0.0  # when a quiet Chrome was last asked whether it still answers
         self.pressed = False    # a drag holds the page's left button
         self.at = None          # where the page's pointer is (CSS px)
+        self.field = {"under": None, "focus": None}  # text fields for the phone's keyboard (PROBE), while held
+        self.last_click = (0.0, 0.0, 0.0, 0)  # (time, x, y, count): taps close together are a double click
 
     # Chrome events (called from the CDP reader)
     def on_event(self, method, params, session_id):
@@ -228,8 +286,10 @@ class Viewer:
             reason = ask.get("reason") if ask and float(ask.get("expires_at") or 0) > time.time() else None
             if isinstance(reason, str):
                 break
+        held = control["state"] == "person" and mine
         return {"type": "state", "protocol": PROTOCOL, "browser": public(self.record), "tabs": [dict(t) for t in self.tabs], "tab": self.tab,
-                "follow": self.follow, "control": control, "ask": reason if isinstance(reason, str) else None}
+                "follow": self.follow, "control": control, "ask": reason if isinstance(reason, str) else None,
+                "field": dict(self.field) if held else None}
 
     # Phone messages
     def on_phone(self, message: dict):
@@ -263,7 +323,7 @@ class Viewer:
                     self.inbox.put_nowait({"type": "move"})
                 except asyncio.QueueFull:
                     self.next_move = None
-        elif kind in ("take", "give", "tap", "down", "up", "scroll", "text", "key", "go", "nav"):
+        elif kind in ("take", "give", "tap", "down", "up", "scroll", "text", "key", "go", "nav", "copy", "select_all"):
             try:
                 self.inbox.put_nowait(message)
             except asyncio.QueueFull:
@@ -273,6 +333,7 @@ class Viewer:
     async def _act(self, message: dict):
         kind = message.get("type")
         if kind == "take":
+            self.field = {"under": None, "focus": None}
             problem = self.take()
             if problem:
                 await self.send_text({"type": "error", "message": problem})
@@ -309,10 +370,14 @@ class Viewer:
         elif kind == "up":
             await self._lift(point())
         elif kind == "tap" and (at := point()):
-            x, y = at
+            x, y = self.at = at
+            then, px, py, count = self.last_click
+            now = time.monotonic()
+            count = count % 3 + 1 if now - then < MULTI_CLICK and abs(x - px) <= CLICK_SLOP and abs(y - py) <= CLICK_SLOP else 1
+            self.last_click = (now, x, y, count)
             await call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y}, session)
-            await call("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}, session)
-            await call("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}, session)
+            await call("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": count}, session)
+            await call("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": count}, session)
         elif kind == "scroll" and (at := point()):
             dy, dx = message.get("dy"), message.get("dx", 0)
             if isinstance(dy, (int, float)) and isinstance(dx, (int, float)):
@@ -338,7 +403,76 @@ class Viewer:
                 entries = history.get("entries") or []
                 if 0 <= index < len(entries):
                     await call("Page.navigateToHistoryEntry", {"entryId": entries[index]["id"]}, session)
+        elif kind == "select_all":
+            await call("Input.dispatchKeyEvent", {"type": "rawKeyDown", "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65,
+                                                  "modifiers": 4, "commands": ["selectAll"]}, session)
+            await call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65, "modifiers": 4}, session)
+        elif kind == "copy":
+            found = await self._probe("selection")
+            text = found.get("text") if isinstance(found, dict) else None
+            await self.send_text({"type": "copied", "text": text[:65536] if isinstance(text, str) else ""})
+        if kind == "move":
+            await self._sense(under=True)
+        elif kind in ("tap", "up", "key", "text", "go", "nav", "select_all"):
+            await self._sense(under=kind in ("tap", "up"), focus=True)
         self.wake.set()
+
+    async def _probe(self, mode: str, at=None):
+        """PROBE in the page, following a cross-origin frame into its own target (or an isolated world)."""
+        call, session = self.cdp.call, self.session
+        x, y = at or (0.0, 0.0)
+        expression = f"{PROBE}({json.dumps(mode)}, {x!r}, {y!r})"
+        result = (await call("Runtime.evaluate", {"expression": expression, "objectGroup": "hq-probe"}, session, timeout=3)).get("result") or {}
+        try:
+            for _ in range(3):  # frames in frames
+                if result.get("type") == "string":
+                    return json.loads(result["value"])
+                if result.get("subtype") != "node" or not result.get("objectId"):
+                    return None
+                frame = result["objectId"]
+                offset = await call("Runtime.callFunctionOn", {"objectId": frame, "returnByValue": True,
+                                                               "functionDeclaration": "function () {const b = this.getBoundingClientRect(); return [b.left + this.clientLeft, b.top + this.clientTop]}"}, session, timeout=3)
+                left, top = (offset.get("result") or {}).get("value") or (0, 0)
+                node = (await call("DOM.describeNode", {"objectId": frame}, session, timeout=3)).get("node") or {}
+                frame_id = node.get("frameId")
+                if not frame_id:
+                    return None
+                x, y = x - left, y - top
+                expression = f"{PROBE}({json.dumps(mode)}, {x!r}, {y!r})"
+                targets = (await call("Target.getTargets", timeout=3)).get("targetInfos") or []
+                if any(t.get("targetId") == frame_id and t.get("type") == "iframe" for t in targets):
+                    inner = (await call("Target.attachToTarget", {"targetId": frame_id, "flatten": True}, timeout=3))["sessionId"]
+                    try:
+                        result = (await call("Runtime.evaluate", {"expression": expression}, inner, timeout=3)).get("result") or {}
+                    finally:
+                        self.cdp.send("Target.detachFromTarget", {"sessionId": inner})
+                    if result.get("subtype") == "node":
+                        return "multiline"  # a frame inside a frame from another site: some text field
+                else:
+                    world = await call("Page.createIsolatedWorld", {"frameId": frame_id, "worldName": "hq-probe"}, session, timeout=3)
+                    result = (await call("Runtime.evaluate", {"expression": expression, "contextId": world["executionContextId"],
+                                                              "objectGroup": "hq-probe"}, session, timeout=3)).get("result") or {}
+            return None
+        finally:
+            self.cdp.send("Runtime.releaseObjectGroup", {"objectGroup": "hq-probe"}, session)
+
+    async def _sense(self, under=False, focus=False, settle=True):
+        """Keeps ``field`` current: the text field under the pointer, the one with the focus."""
+        if not self.session:
+            return
+        if focus and settle:
+            await asyncio.sleep(0.12)  # the page's own focus handlers run first
+        for key, wanted, at in (("under", under, self.at), ("focus", focus, None)):
+            if not wanted or (key == "under" and at is None):
+                continue
+            try:
+                kind = await self._probe("point" if key == "under" else "focus", at)
+            except Exception:  # noqa: BLE001 - a page mid-navigation; the next input asks again
+                kind = None
+            kind = kind if kind in FIELD_KINDS else None
+            if self.field[key] != kind:
+                self.field = {**self.field, key: kind}
+                self.changed = True
 
     async def _lift(self, at=None):
         """Ends a drag (a give-back or a lost viewer never leaves the page's button held)."""
@@ -517,6 +651,8 @@ class Viewer:
                         await refreshed
                     self.ended = self.ended or self._still_open()
                     self._advance_claim()
+                    if self.claim is not None and self._state()["field"] is not None:
+                        await self._sense(focus=True, settle=False)  # the page moves its focus by itself too
                     self.changed = True  # control files and asks change outside this socket
                 if self.ended:
                     await self.send_text({"type": "ended", "reason": self.ended})
