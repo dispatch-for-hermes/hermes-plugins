@@ -239,11 +239,13 @@ def status_body(root: Path, sender) -> dict:
     """`seal`: registrations may carry a seal key (the app sends one only when this says so). `replies: "watcher"`
     (0.3): reply alerts cover every bot, scheduled jobs included (ReplyWatcher); the app offers an update without it.
     `health` (0.4): how deliveries went, across every process that sent (Health), for the app's Diagnostics.
-    `plugin` (0.5): this plugin's name since the rename, and `predecessor`: dispatch-push is loaded too (and quieted)."""
+    `plugin` (0.5): this plugin's name since the rename, and `predecessor`: dispatch-push is loaded too (and quieted).
+    `desktopThemes` (0.6): it puts the Hermes HQ themes in the desktop app (desktop_theme.py); the app offers an update
+    to a plugin without it."""
     store = Store(root / "devices.db")
-    return {"ok": True, "version": 5, "plugin": NAME, "pluginVersion": PLUGIN_VERSION,
+    return {"ok": True, "version": 6, "plugin": NAME, "pluginVersion": PLUGIN_VERSION,
             "delivery": type(sender).__name__ if sender else None,
-            "kinds": list(KINDS), "seal": SEALS, "replies": "watcher", "devices": len(store.devices()),
+            "kinds": list(KINDS), "seal": SEALS, "replies": "watcher", "desktopThemes": True, "devices": len(store.devices()),
             "health": Health(store.path).summary(), "predecessor": quiet_predecessor()}
 
 
@@ -525,7 +527,7 @@ class DirectAPNs:
         raise DeliveryError(code, f"APNs {code} {reason or (result.stderr or '').strip()[:120]}".strip(), transient)
 
 
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.6.0"
 
 
 class Relay:

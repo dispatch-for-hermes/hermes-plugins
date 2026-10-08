@@ -1,6 +1,6 @@
-// Hermes HQ theme: a desktop Hermes theme that looks like Hermes HQ on an iPhone.
+// Hermes HQ theme: a desktop Hermes theme that looks like Hermes HQ on an iPhone (and Nous High Contrast, below).
 //
-// It adds one theme, "Hermes HQ", to Settings › Appearance (and Cmd-K, /skin), through desktop's own `themes`
+// It adds the theme "Hermes HQ" to Settings › Appearance (and Cmd-K, /skin), through desktop's own `themes`
 // contribution area: no Hermes code changes. The palette is the phone's iOS one (src/ui-kit/ios-theme.ts and
 // src/phone-ios-tokens.css): white page and #f2f2f7 sidebar in light, true black and #1c1c1e in dark, iOS system
 // blue, the SF system font. The CSS below gives it the phone's shapes: iOS corner radii instead of desktop's nearly
@@ -92,11 +92,81 @@ export const THEME = {
   customCSS: CSS,
 }
 
+// Nous High Contrast: desktop's own Nous palette (@hermes/shared theme-presets.ts, copied: a plugin can't import it)
+// with Hermes HQ's High Contrast option (src/phone-ui-contrast.css) on top. Every value below is mixed from the
+// theme's own text, page and accent, as the phone does: lines and secondary text pulled toward the text colour, boxes
+// lifted off the page, your messages tinted with the accent and outlined. The palette is set inline on <html>, so these
+// go on <body>, where everything inherits them.
+export const NOUS_LIGHT = {
+  background: '#ffffff', foreground: '#1f2328', card: '#f6f8fa', cardForeground: '#1f2328',
+  muted: '#f6f6f6', mutedForeground: '#656d76', popover: '#ffffff', popoverForeground: '#1f2328',
+  primary: '#0053fd', primaryForeground: '#ffffff', secondary: '#deeaff', secondaryForeground: '#1f2328',
+  accent: '#e3edff', accentForeground: '#1f2328', border: '#d0d7de', input: '#ffffff', ring: '#0053fd',
+  midground: '#0053fd', midgroundForeground: '#ffffff', composerRing: '#0053fd',
+  destructive: '#cf222e', destructiveForeground: '#ffffff',
+  sidebarBackground: '#f6f8fa', sidebarBorder: '#d0d7de', userBubble: '#dae7fd', userBubbleBorder: '#d0d7de',
+}
+export const NOUS_DARK = {
+  background: '#0d1117', foreground: '#e6edf3', card: '#010409', cardForeground: '#e6edf3',
+  muted: '#1a1e24', mutedForeground: '#7d8590', popover: '#161b22', popoverForeground: '#e6edf3',
+  primary: '#4a84fe', primaryForeground: '#161616', secondary: '#1d2e4f', secondaryForeground: '#e6edf3',
+  accent: '#17243a', accentForeground: '#e6edf3', border: '#30363d', input: '#0d1117', ring: '#4a84fe',
+  midground: '#4a84fe', midgroundForeground: '#161616', composerRing: '#4a84fe',
+  destructive: '#f85149', destructiveForeground: '#ffffff',
+  sidebarBackground: '#010409', sidebarBorder: '#30363d', userBubble: '#07162c', userBubbleBorder: '#30363d',
+}
+
+export const CONTRAST_CSS = `
+body {
+  --hc-ink:var(--theme-foreground);--hc-page:var(--theme-background-seed);--hc-accent:var(--theme-midground);
+  /* Lines: the text colour at a fixed share, about twice the theme's own (harder ones read as too much). */
+  --ui-stroke-primary:color-mix(in srgb,var(--hc-ink) 18%,transparent);
+  --ui-stroke-secondary:color-mix(in srgb,var(--hc-ink) 13%,transparent);
+  --ui-stroke-tertiary:color-mix(in srgb,var(--hc-ink) 10%,transparent);
+  --dt-border:var(--ui-stroke-secondary);--dt-input:var(--ui-stroke-primary);--dt-sidebar-border:var(--ui-stroke-tertiary);
+  /* Secondary and tertiary text: a step toward the text colour. */
+  --ui-text-secondary:color-mix(in oklab,var(--hc-ink) 82%,var(--hc-page));
+  --ui-text-tertiary:color-mix(in oklab,var(--hc-ink) 64%,var(--hc-page));
+  /* Boxes (cards, code, the message bar's field) lifted clearly off the page. */
+  --ui-bg-editor:color-mix(in oklab,var(--hc-ink) 10%,var(--hc-page));
+  --ui-bg-card:var(--ui-bg-editor);
+  /* A selected row: the accent, so it never reads as just another surface. */
+  --ui-row-active-background:color-mix(in oklab,var(--hc-accent) 22%,var(--hc-page));
+  /* Your messages: the accent's tint with an accent outline. */
+  --dt-user-bubble:color-mix(in oklab,var(--hc-accent) 28%,var(--hc-page));
+  --dt-user-bubble-border:color-mix(in oklab,var(--hc-accent) 75%,var(--hc-page));
+}
+/* Light pages show a tint far more than dark ones: lighter fills, the same lines. */
+html:not(.dark) body {
+  --ui-bg-editor:color-mix(in oklab,var(--hc-ink) 5%,var(--hc-page));
+  --ui-row-active-background:color-mix(in oklab,var(--hc-accent) 14%,var(--hc-page));
+  --dt-user-bubble:color-mix(in oklab,var(--hc-accent) 13%,var(--hc-page));
+  --dt-user-bubble-border:color-mix(in oklab,var(--hc-accent) 65%,var(--hc-page));
+}
+/* The chat keeps the strong treatment: your message and the message bar get a full-strength outline. */
+[data-slot='aui_user-message-root'] .composer-human-message {border-color:var(--dt-user-bubble-border)}
+[data-slot='composer-root'] .ui-prompt-input__container {border-color:color-mix(in srgb,var(--hc-ink) 50%,transparent)}
+`
+
+const NOUS_SANS = '"Segoe WPC", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif, "Apple Color Emoji"'
+const NOUS_MONO = '"JetBrains Mono", "Cascadia Code", "Cascadia Mono", "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Noto Mono", "SF Mono", ui-monospace, Menlo, Monaco, Consolas, monospace, "Apple Color Emoji"'
+
+export const NOUS_HIGH_CONTRAST = {
+  name: 'nous-high-contrast',
+  label: 'Nous High Contrast',
+  description: 'Nous with Hermes HQ’s High Contrast: clearer lines and text, your messages outlined in blue',
+  typography: { fontSans: NOUS_SANS, fontMono: NOUS_MONO },
+  colors: NOUS_LIGHT,
+  darkColors: NOUS_DARK,
+  customCSS: CONTRAST_CSS,
+}
+
 export default {
   id: 'hermes-hq-theme',
   name: 'Hermes HQ theme',
-  description: 'Adds the Hermes HQ theme: the iPhone app’s colours and shapes on desktop.',
+  description: 'Adds the Hermes HQ themes: the iPhone app’s look, and Nous with its High Contrast option.',
   register(ctx) {
     ctx.register({ id: 'hermes-hq', area: 'themes', title: THEME.label, data: THEME })
+    ctx.register({ id: 'nous-high-contrast', area: 'themes', title: NOUS_HIGH_CONTRAST.label, data: NOUS_HIGH_CONTRAST })
   },
 }
