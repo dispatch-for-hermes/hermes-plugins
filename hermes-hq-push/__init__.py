@@ -4,6 +4,7 @@ Hooks run wherever an agent turn runs; they only enqueue. App sessions (platform
 ``hermes serve``, which also mounts ``dashboard/plugin_api.py``, so an approval pushed from here can be
 answered from the lock screen through that route. Messaging-platform sessions are ignored. Reply alerts don't come from hooks: ``push.ReplyWatcher`` (started by
 ``dashboard/plugin_api.py`` in the server) reads every profile's replies, so one install covers every bot.
+On load it also puts the Hermes HQ theme in the desktop app's plugin folder (desktop_theme.py).
 """
 import importlib.util
 import logging
@@ -67,6 +68,21 @@ def post_approval_response(**kwargs):
         log.debug("hermes-hq-push settle hook failed", exc_info=True)
 
 
+def _desktop_theme():
+    """The Hermes HQ theme for the desktop app (desktop_theme.py): a nicety, so nothing here ever stops the plugin."""
+    try:
+        spec = importlib.util.spec_from_file_location("hermes_hq_push_theme", Path(__file__).with_name("desktop_theme.py"))
+        theme = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(theme)
+        from hermes_constants import get_default_hermes_root
+        outcome = theme.install(get_default_hermes_root())
+        if outcome in ("added", "updated"):
+            log.info("hermes-hq-push: %s the Hermes HQ theme for the desktop app", outcome)
+    except Exception:
+        log.debug("hermes-hq-push: desktop theme not written", exc_info=True)
+
+
 def register(ctx):
     ctx.register_hook("pre_approval_request", pre_approval_request)
     ctx.register_hook("post_approval_response", post_approval_response)
+    _desktop_theme()

@@ -10,6 +10,11 @@ when the app isn't open. Approvals carry **Approve once** and **Deny** buttons t
 
 Without this plugin, Hermes HQ can only alert you while it's open, or for about 20 seconds after you leave it.
 
+From version 0.6 it also adds a **Hermes HQ theme** to the Hermes desktop app on the same computer: iOS colours, blue
+message bubbles and round shapes, in light and dark. It only adds the choice. To use it, open Settings › Appearance ›
+Theme in the desktop app and pick **Hermes HQ**. (It writes one file, `desktop-plugins/hermes-hq-theme/plugin.js` in
+your Hermes folder, when Hermes loads the plugin.)
+
 This plugin was called `dispatch-push` before version 0.5. It takes over the old plugin's registered phones on its
 first start, and reads the old `DISPATCH_*` settings when the new names aren't set.
 
