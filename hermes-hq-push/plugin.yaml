@@ -1,11 +1,11 @@
 name: hermes-hq-push
-version: "0.6.0"
+version: "0.7.0"
 manifest_version: 2
 kind: standalone
-description: "Apple push notifications for the Hermes HQ iPhone app: finished turns (who replied and what they said) and approvals (the command), with Approve/Deny from the lock screen. Also adds the Hermes HQ theme to the Hermes desktop app. Replaces dispatch-push (its registered phones carry over)."
+description: "Apple push notifications for the Hermes HQ iPhone app: finished turns (who replied and what they said) and approvals (the command), with Approve/Deny from the lock screen. Also adds the Hermes HQ theme to the Hermes desktop app, and stops a bot's one-time restart from looping (launchctl submit) and locking the app out. Replaces dispatch-push (its registered phones carry over)."
 author: Hermes HQ
 provides_tools: []
-provides_hooks: [pre_approval_request, post_approval_response]
+provides_hooks: [pre_approval_request, post_approval_response, pre_tool_call]
 optional_env:
   - name: HERMES_HQ_APNS_KEY_PATH
     description: "Direct mode: path to the app's APNs auth key (.p8). Only the app's developer has this. (DISPATCH_APNS_KEY_PATH still works.)"
