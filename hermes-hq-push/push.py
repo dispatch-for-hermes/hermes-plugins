@@ -242,11 +242,12 @@ def status_body(root: Path, sender) -> dict:
     `plugin` (0.5): this plugin's name since the rename, and `predecessor`: dispatch-push is loaded too (and quieted).
     `desktopThemes` (0.6): it puts the Hermes HQ themes in the desktop app (desktop_theme.py); the app offers an update
     to a plugin without it. `restartGuard` (0.7): it blocks `launchctl submit` and removes a restart job that loops
-    (restart_guard.py); the app offers an update to a plugin without it."""
+    (restart_guard.py); the app offers an update to a plugin without it. `perfLogs` (0.8): it keeps the app's performance
+    log on this computer (perf_logs.py), and `moments` (0.8): a marked moment's content-free bundle too (POST /logs/moment)."""
     store = Store(root / "devices.db")
     return {"ok": True, "version": 6, "plugin": NAME, "pluginVersion": PLUGIN_VERSION,
             "delivery": type(sender).__name__ if sender else None,
-            "kinds": list(KINDS), "seal": SEALS, "replies": "watcher", "desktopThemes": True, "restartGuard": True, "devices": len(store.devices()),
+            "kinds": list(KINDS), "seal": SEALS, "replies": "watcher", "desktopThemes": True, "restartGuard": True, "perfLogs": True, "moments": True, "devices": len(store.devices()),
             "health": Health(store.path).summary(), "predecessor": quiet_predecessor()}
 
 
@@ -528,7 +529,7 @@ class DirectAPNs:
         raise DeliveryError(code, f"APNs {code} {reason or (result.stderr or '').strip()[:120]}".strip(), transient)
 
 
-PLUGIN_VERSION = "0.7.0"
+PLUGIN_VERSION = "0.8.0"
 
 
 class Relay:

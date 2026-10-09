@@ -15,6 +15,15 @@ message bubbles and round shapes, in light and dark. It only adds the choice. To
 Theme in the desktop app and pick **Hermes HQ**. (It writes one file, `desktop-plugins/hermes-hq-theme/plugin.js` in
 your Hermes folder, when Hermes loads the plugin.)
 
+From version 0.8 it also keeps Hermes HQ's **performance log** on the same computer, so slow or jumpy moments on the
+phone can be looked into later: timings and connection events (when the app's connections opened and closed, how long
+pages took, when the screen stalled), never message text. The phone sends them with your normal sign-in, and the plugin
+writes them to `hq-logs/<phone>/<date>.jsonl` in your Hermes folder (at most 16 MB a day and 14 days per phone). Nothing
+goes anywhere else. The app also checks itself (a reply stuck on "Working…", a card left up, a message shown twice, a
+screen that stopped taking taps) and logs what it finds, still without any content. When you tap **Mark a Janky
+Moment** (or shake the phone), it adds the minute's frame times and the screen's layout as plain boxes (no text) in
+`hq-logs/<phone>/moments/`. Turn it off in Hermes HQ under **Settings › About › Send Performance Logs to Your Computer**.
+
 This plugin was called `dispatch-push` before version 0.5. It takes over the old plugin's registered phones on its
 first start, and reads the old `DISPATCH_*` settings when the new names aren't set.
 
