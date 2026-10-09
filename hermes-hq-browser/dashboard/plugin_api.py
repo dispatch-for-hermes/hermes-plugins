@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 log = logging.getLogger("hermes-hq-browser")
 _ROOT = Path(__file__).parents[1]
-VERSION = "3.4.4"
+VERSION = "3.5.0"
 RETAIN_ENDED = 120.0
 MAX_VIEWERS = 8
 VIEWER_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -46,6 +46,7 @@ tabs = _load("tabs")
 tracker = tabs.Tracker(cdp)
 router = APIRouter()
 _viewers = 0
+_streams: set = set()  # the running watch streams (stream.Viewer), to end a phone's old one when it comes back
 _supervisor = None
 
 
@@ -299,12 +300,52 @@ def _listing(owner="", sessions=()):
     return {"schema": "dispatch-browser.list.v3", "protocol": stream.PROTOCOL, "browsers": rows[:24]}
 
 
+# The activity sockets' listing. Each connected socket scanned the spool (every browser record, claim and ask file)
+# once a second, whatever had changed. A spool write is a rename into its folder, so the folders' mtimes say when a
+# browser was published or ended, a claim or an ask was written or removed; a heartbeat going stale or a claim
+# expiring changes no folder, so a scan is also redone after _LISTING_MAX_AGE. One cache serves every socket.
+_LISTING_MAX_AGE = 3.0
+_listing_cache: dict = {}
+_listing_lock = threading.Lock()
+
+
+def _spool_signature():
+    signature = []
+    for kind in ("browsers", "control", "asks"):
+        try:
+            signature.append(os.stat(spool.folder(kind)).st_mtime_ns)
+        except OSError:
+            signature.append(None)
+    return tuple(signature)
+
+
+def _listing_cached(owner=""):
+    signature, now = _spool_signature(), time.monotonic()
+    with _listing_lock:
+        kept = _listing_cache.get(owner)
+        if kept and kept[0] == signature and now - kept[1] < _LISTING_MAX_AGE:
+            return kept[2]
+    listing = _listing(owner)
+    with _listing_lock:
+        _listing_cache[owner] = (signature, now, listing)
+        while len(_listing_cache) > 64:
+            _listing_cache.pop(next(iter(_listing_cache)))
+    return listing
+
+
 def _record(ident):
     if not spool.ID.match(ident):
         raise HTTPException(404, "No such browser")
-    _publish_standing(force=True)  # blocking: watch() calls this from a thread
+
+    def live(found):
+        return found is not None and found.get("id") == ident and spool.live(found) and cdp.LOOPBACK.match(found.get("endpoint") or "")
     record = spool.read(spool.folder("browsers") / f"{ident}.json")
-    if record is None or record.get("id") != ident or not spool.live(record) or not cdp.LOOPBACK.match(record.get("endpoint") or ""):
+    if not live(record):
+        # Not listed (or not lately): ask every bot's Chrome now. A listed one skips that (it costs an HTTP round trip
+        # to each bot's Chrome, two seconds for a frozen one) on the phone's way back to its view.
+        _publish_standing(force=True)  # blocking: watch() calls this from a thread
+        record = spool.read(spool.folder("browsers") / f"{ident}.json")
+    if not live(record):
         raise HTTPException(404, "This browser has closed")
     # A Chrome found through its discovery root (browser.cdp_url) gets a new browser id when it restarts on the same
     # port; ask it now rather than trust an endpoint the bot side published before the restart.
@@ -366,7 +407,7 @@ async def activity(ws: WebSocket):
     try:
         while not closed.done():
             await _standing_async()
-            listing = await asyncio.to_thread(_listing, owner)
+            listing = await asyncio.to_thread(_listing_cached, owner)
             if listing != last:
                 last = listing
                 await ws.send_json(listing)
@@ -396,12 +437,11 @@ async def watch(ws: WebSocket, ident: str):
         log.info("hermes-hq-browser: watch %s refused: no such live browser", ident)
         await ws.close(code=4404, reason="This browser has closed")
         return
-    if _missing() or _viewers >= MAX_VIEWERS:
-        log.info("hermes-hq-browser: watch %s refused: %s", ident, _missing() or f"{_viewers} viewers open")
+    if _missing():
+        log.info("hermes-hq-browser: watch %s refused: %s", ident, _missing())
         await ws.close(code=1013, reason="Try again shortly")
         return
     await ws.accept()
-    _viewers += 1
 
     async def receive():
         try:
@@ -420,12 +460,26 @@ async def watch(ws: WebSocket, ident: str):
             viewer_id = hello["viewer"]
     except (asyncio.TimeoutError, ValueError):
         pass
+    # The same phone back on a new socket (an app switch, a network change): its old stream is a husk on a half-open
+    # socket that would hold a viewer slot and a screencast until the server's keepalive noticed. End it now.
+    replaced = [v for v in _streams if v.viewer_id == viewer_id]
+    for old in replaced:
+        old.superseded = True
+        old.wake.set()
+    if _viewers - sum(1 for v in _streams if v.superseded) >= MAX_VIEWERS:
+        log.info("hermes-hq-browser: watch %s refused: %d viewers open", ident, _viewers)
+        await ws.close(code=1013, reason="Try again shortly")
+        return
+    _viewers += 1
     source = record.get("source") or []
     chrome = str(source[1]) if len(source) == 2 and source[0] == "cdp" and "/devtools/browser/" not in str(source[1]) else ""
     viewer = stream.Viewer(spool, cdp, record, ws.send_json, _siblings, _standing_async,
                            recent=(lambda: tracker.recent(chrome)) if chrome else None)
+    # Held across the reconnect: which tab goes back to the front when the person hands the browser back.
+    viewer.fronted = next((v.fronted for v in replaced if v.fronted and v.record.get("id") == ident), None)
     watched = record.get("profile")
     _watching[watched] = _watching.get(watched, 0) + 1  # an old Chrome isn't started afresh under a watching phone
+    _streams.add(viewer)
     try:
         await viewer.run(receive, viewer_id)
     except (WebSocketDisconnect, asyncio.CancelledError):
@@ -445,6 +499,7 @@ async def watch(ws: WebSocket, ident: str):
             pass
     finally:
         _viewers -= 1
+        _streams.discard(viewer)
         _watching[watched] = max(0, _watching.get(watched, 1) - 1)
         try:
             await ws.close()

@@ -7,9 +7,9 @@ debugging endpoint comes from Chromium itself (a Hermes-managed browser's daemon
 every browser tool Hermes gives them; nothing is wrapped, overridden or patched. If the internals read here
 change shape, ``problems()`` says so and the plugin stays off.
 
-While a person holds a browser (``control/<id>.json``), ``pre_tool_call`` refuses that bot's browser tools,
-so the bot cannot click under the person's finger. ``browser_ask_user`` lets a bot hand its browser to the
-person (a login, a code, a CAPTCHA) and wait for it back.
+While a person holds a browser (``control/<id>.json``), ``pre_tool_call`` holds that bot's browser tools for a
+while (HOLD_FOR) and then refuses them, so the bot cannot click under the person's finger. ``browser_ask_user`` lets
+a bot hand its browser to the person (a login, a code, a CAPTCHA) and wait for it back.
 """
 from __future__ import annotations
 
@@ -278,14 +278,42 @@ def controlled(ident: str | None) -> bool:
 
 
 SESSION_PREFIX = "d-"
+# Parallel subagents (delegate_task children, task ids "sa-…" / "subagent-…") each get a Browser Use session of their
+# own, so one subagent's steps don't move the other's current tab inside a shared harness daemon. A daemon outlives its
+# calls, so subagents share a small pool of slots per profile: a slot is free again once its last user has been quiet
+# SLOT_IDLE seconds; with every slot taken, a subagent shares the profile's main session as before.
+SUBAGENT_TASK = re.compile(r"^(sa|subagent)-\d+-[0-9a-f]{4,32}$")
+SUB_SLOTS = 3
+SLOT_IDLE = 300.0
+_slots: dict[str, list] = {}  # subagent task id -> [slot, last used]
 
 
-def own_session(args: dict | None) -> str | None:
+def _slot_of(task_id: str, now: float | None = None) -> int | None:
+    """This subagent's session slot (1..SUB_SLOTS), or None (not a subagent, or every slot is in use)."""
+    if not task_id or not SUBAGENT_TASK.match(str(task_id)):
+        return None
+    now = time.time() if now is None else now
+    with _lock:
+        mine = _slots.get(task_id)
+        if mine is not None:
+            mine[1] = now
+            return mine[0]
+        for other in [t for t, (_, at) in _slots.items() if now - at >= SLOT_IDLE]:
+            _slots.pop(other, None)
+        taken = {slot for slot, _ in _slots.values()}
+        free = next((slot for slot in range(1, SUB_SLOTS + 1) if slot not in taken), None)
+        if free is not None:
+            _slots[task_id] = [free, now]
+        return free
+
+
+def own_session(args: dict | None, task_id: str = "") -> str | None:
     """The Browser Use session a bot's ``browser_exec`` runs in when its browser is its own local Chrome
     (``browser.cdp_url``). Browser Use keeps one harness daemon per session name, connected to the browser it
     started with, and every call without a name shares the ``default`` one: with a Chrome per bot, one bot's
-    steps would land in whichever bot's Chrome that daemon found first. Named per profile, each bot keeps its own.
-    A name the bot chose is kept, under its profile's prefix. None leaves the call alone."""
+    steps would land in whichever bot's Chrome that daemon found first. Named per profile, each bot keeps its own
+    (and a subagent its own slot, see SUB_SLOTS). A name the bot chose is kept, under its profile's prefix. None
+    leaves the call alone."""
     source = exec_source()
     if not source or source[0] != "cdp" or "/devtools/browser/" in source[1] or not source[1].startswith(LOCAL_CDP):
         return None
@@ -293,6 +321,8 @@ def own_session(args: dict | None) -> str | None:
     given = str((args or {}).get("session") or "")
     if given == base or given.startswith(base + "-"):
         return given
+    if not given and (slot := _slot_of(task_id)) is not None:
+        return f"{base}-s{slot}"
     name = f"{base}-{given}" if given else base
     return name if len(name) <= 64 else f"{base}-{hashlib.sha256(given.encode()).hexdigest()[:16]}"
 
@@ -318,10 +348,40 @@ def _own_chrome_up() -> None:
         _starting[raw] = time.time()
 
 
+HOLD_FOR = 20.0   # a bot browser call waits at most this long for the person to hand the browser back
+HOLD_POLL = 0.25
+
+
+def _hold_limit() -> float:
+    """How long a call may wait in ``pre_tool_call``: Hermes ends a callback that runs past
+    ``plugins.hook_callback_timeout`` (default 30 s) and then skips the hook for a while, so stay well inside it."""
+    try:
+        from hermes_cli.plugins import _resolve_hook_callback_timeout
+        limit = float(_resolve_hook_callback_timeout())
+    except Exception:  # noqa: BLE001 - not inside Hermes (tests) or the setting moved: its 30 s default
+        limit = 30.0
+    if limit <= 0:  # unbounded
+        return HOLD_FOR
+    return max(0.0, min(HOLD_FOR, limit - 8.0))
+
+
+def _wait_for_handback(ident) -> None:
+    """While a person holds this browser, a bot's browser call waits for them to hand it back (up to the hold
+    limit) instead of failing at once: each refusal is a tool result the bot reacts to, so a bot in a loop would burn
+    turns and fill the chat with refused calls while the person types."""
+    deadline = time.monotonic() + _hold_limit()
+    while time.monotonic() < deadline and controlled(ident):
+        time.sleep(HOLD_POLL)
+
+
 def before_tool(tool_name="", args=None, task_id="", session_id="", tool_call_id=None, **_):
     """``pre_tool_call``: refuse a browser tool while a person holds or has asked for that browser; count
     running calls. The claim check and the count happen under ``_lock``, the same lock ``tick`` holds while it
     tells the dashboard the bot has paused, so no call slips in after that promise."""
+    if str(tool_name).startswith("browser_vault_"):
+        with _lock:
+            _vault_at[str(session_id or task_id)] = time.time()
+        return None
     if tool_name not in BROWSER_TOOLS or not task_id:
         return None
     directive = None
@@ -329,7 +389,7 @@ def before_tool(tool_name="", args=None, task_id="", session_id="", tool_call_id
         _own_chrome_up()
         args = dict(args or {})
         if tool_name == BROWSER_EXEC:
-            session = own_session(args)
+            session = own_session(args, task_id)
             if session and session != args.get("session"):
                 args["session"] = session
                 directive = {"action": "modify", "args": {"session": session}}
@@ -338,6 +398,8 @@ def before_tool(tool_name="", args=None, task_id="", session_id="", tool_call_id
             ident = _keys.get(key)
         if ident is None:
             ident = _track(key, session_id, task_id, tool_name)
+        if controlled(ident):
+            _wait_for_handback(ident)  # outside the lock: tick keeps the pause promise while this call waits
         now = time.time()
         with _lock:
             if controlled(ident):
@@ -359,7 +421,7 @@ def after_tool(tool_name="", args=None, result=None, task_id="", session_id="", 
         return None
     try:
         args = dict(args or {})
-        if tool_name == BROWSER_EXEC and (session := own_session(args)):
+        if tool_name == BROWSER_EXEC and (session := own_session(args, task_id)):
             args["session"] = session  # the session before_tool gave it, whichever args Hermes hands back
         key = _session_key(tool_name, args, task_id)
         call = _call_id(tool_call_id, tool_name)
@@ -520,6 +582,10 @@ def ask_user(args=None, task_id="", session_id="", **_):
         return json.dumps({"error": "Say what you need the user to do in the browser (reason)."})
     if not task_id:
         return json.dumps({"error": "No browser is open for this task."})
+    # A sign-in is the bot's to do: hand it over only once the vault couldn't (or the person asked to do it).
+    if SIGN_IN_ASK.search(reason) and not args.get("user_asked") and \
+            time.time() - _vault_at.get(str(session_id or task_id), 0.0) > VAULT_TRIED:
+        return json.dumps({"status": "sign_in_yourself", "message": SIGN_IN})
     key = _key_for_chat(session_id or task_id) or _session_key("browser_navigate", {}, task_id)
     if browser_of(_session_info(key)) is None:
         exec_key = _session_key(BROWSER_EXEC, args, task_id)
@@ -573,37 +639,47 @@ def ask_user(args=None, task_id="", session_id="", **_):
 
 ASK_SCHEMA = {
     "name": ASK_TOOL,
-    "description": ("Hand your browser to the user and wait until they give it back. Use it when a page needs the user "
-                    "themself: a CAPTCHA, approving a payment or purchase, or a sign-in they'd rather do (sign in for "
-                    "them with the browser_vault_* tools first when you can). They watch and "
-                    "control your browser from the Hermes HQ app; your browser tools are paused while they do. Returns when "
-                    "they hand it back (take a fresh snapshot then), or after about six minutes if they haven't finished."),
+    "description": ("Last resort: hand your browser to the user and wait until they give it back. Only for what you "
+                    "can't do yourself: a CAPTCHA, approving a payment or purchase, or a sign-in form the "
+                    "browser_vault_* tools can't reach. Never for an ordinary sign-in: sign in yourself with "
+                    "browser_vault_fill, or browser_vault_save_login to get the login from the user securely. They "
+                    "control your browser from the Hermes HQ app; your browser tools are paused while they do. Returns "
+                    "when they hand it back (take a fresh snapshot then), or after about six minutes if they haven't finished."),
     "parameters": {"type": "object", "properties": {
         "reason": {"type": "string", "description": "What you need them to do, in a short sentence (shown to the user)."},
+        "user_asked": {"type": "boolean", "description": "True only when the user said they want to do this themself."},
     }, "required": ["reason"]},
 }
 
 
+SIGN_IN = ("Signing in is your job, not the user's: browser_vault_list, then browser_vault_fill a saved login; "
+           "with none saved, call browser_vault_save_login right away (it asks the user for the username and password "
+           "in a secure prompt, never in chat) and sign in with it; browser_vault_enter_code for codes. Don't ask the "
+           "user to sign in for you or to open Watch Browser: Hermes HQ already shows them you're browsing. Only if the "
+           "vault can't reach the form (it sits in a frame), offer to type a login they send in chat; browser_ask_user "
+           "is for CAPTCHAs, approving payments, or the user choosing to do it themself.")
 GUIDANCE = (
     "Your web browser and Hermes HQ: when the user asks you to open, pull up, show, look at or browse a website, "
-    "use your own browser tools (browser_exec, or browser_navigate and the other browser_* tools). The user watches "
-    "your browser live in the Hermes HQ app (Watch Browser) and can take it over. desktop_preview opens a page on "
-    "the user's phone instead and you can't act in it; use it only when they ask for that. "
-    "Signing in is your job: browser_vault_list, then browser_vault_fill a saved login, or browser_vault_save_login "
-    "to ask the user for it (a secure prompt; it never enters the chat), browser_vault_enter_code for codes. If those "
-    "can't reach the form (it sits in a frame), ask the user whether they'll send the login in chat for you to type, "
-    "or sign in themselves (browser_ask_user). Use browser_ask_user for CAPTCHAs and approving payments. "
-    "A page that seems broken or empty is often a sign-in in a frame: print(capture_screenshot()) in browser_exec "
-    "so you see it."
+    "use your own browser tools (browser_exec, or browser_navigate and the other browser_* tools). The user can watch "
+    "your browser live in the Hermes HQ app (Watch Browser) and take it over. desktop_preview opens a page on "
+    "the user's phone instead and you can't act in it; use it only when they ask for that. Keep doing the task "
+    "yourself until you truly can't. " + SIGN_IN + " A page that seems broken or empty is often a sign-in in a "
+    "frame: print(capture_screenshot()) in browser_exec so you see it."
 )
 BROWSING = __import__("re").compile(
     r"\b(browser|web ?site|web ?page|pull (it |that |this |something )?up|open (up )?(the |a |that |this |your )?(site|page|link|url|tab)s?\b|go to|navigate|look (it )?up|"
     r"google|search the web|https?://|www\.)|\b[a-z0-9-]+\.(com|org|net|io|dev|ai|co|app)\b", __import__("re").I)
 NUDGE = ("(Hermes HQ: for websites use your own browser tools, which the user can watch and take over in Watch Browser; "
-         "desktop_preview would open the page on the user's phone instead. Sign in for the user: browser_vault_list / "
-         "browser_vault_fill / browser_vault_save_login; if those can't reach the form, ask whether they'll send the "
-         "login in chat or sign in themselves (browser_ask_user). A page that seems empty may be a sign-in in a frame: "
-         "print(capture_screenshot()) to see it.)")
+         "desktop_preview would open the page on the user's phone instead. " + SIGN_IN + " A page that seems empty may "
+         "be a sign-in in a frame: print(capture_screenshot()) to see it.)")
+# Every other turn of a bot with its own browser: chats older than the plugin never got GUIDANCE (bot chats live for
+# weeks), and a turn like "get us more sales" names no site, yet the bot may browse into a login mid-turn.
+REMINDER = ("(Hermes HQ: if you use your browser and meet a sign-in, sign in yourself: browser_vault_fill a saved "
+            "login, or browser_vault_save_login to get it from the user in a secure prompt. Don't ask the user to sign "
+            "in for you; they already see you're browsing.)")
+SIGN_IN_ASK = __import__("re").compile(r"\b(sign|log)[ -]?(in|on)\b|\blogin\b|\bpassword\b|\bcredential", __import__("re").I)
+VAULT_TRIED = 1800.0      # a vault call this recent in the chat lets browser_ask_user hand over a sign-in
+_vault_at: dict[str, float] = {}
 RECENT_BROWSING = 1800.0  # a chat whose bot used its browser this recently gets the reminder on every turn
 
 
@@ -627,8 +703,11 @@ def before_llm(user_message=None, session_id="", **_):
         quiet_predecessor()
         text = user_message if isinstance(user_message, str) else str(user_message or "")
         browsing = bool(text and BROWSING.search(text[:4000]))
-        if (browsing or (session_id and _browsed_recently(str(session_id)))) and ask_available():
+        if not ask_available():
+            return None
+        if browsing or (session_id and _browsed_recently(str(session_id))):
             return {"context": NUDGE}
+        return {"context": REMINDER}
     except Exception:  # noqa: BLE001
         pass
     return None

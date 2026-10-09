@@ -7,9 +7,10 @@ browser tool Hermes gives them; this plugin adds one, `browser_ask_user`, and ov
 ## What the person gets
 
 - **Watch Browser** (bot menu, chat ⋯ menu, Bot Info, and a card above the composer while the bot browses):
-  the bot's page, live, following the tab it works in.
-- **Take Control**: the bot finishes the browser step it is in, then its browser tools are refused until the
-  person taps **Give Back**. Taps, scrolls, typing, Return/Tab/Delete, back/forward/reload and an address bar
+  the bot's page, live, following the tab it works in. Watching never changes which tab the bot's Chrome shows
+  (a background tab is shown with stills).
+- **Take Control**: the bot finishes the browser step it is in, then its browser tools wait (about 20 seconds,
+  then are refused) until the person taps **Give Back**. Taps, scrolls, typing, Return/Tab/Delete, back/forward/reload and an address bar
   reach the page. Leaving the app to fetch a code keeps the browser held for two minutes.
 - **The bot asks**: a bot that hits a sign-in, a code or a CAPTCHA calls `browser_ask_user(reason)`. The card in
   its chat and its row in Bots say what it needs; the call returns when the person gives the browser back

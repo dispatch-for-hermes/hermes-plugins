@@ -29,12 +29,24 @@ phone → server
   (a drag), ``scroll {x, y, dy, dx}`` (x, y as 0–1 fractions of the frame; dy, dx in page pixels), ``text {text}``,
   ``key {key}``, ``go {url}``, ``nav {action}``, ``copy`` (the selection, answered with ``copied``), ``select_all``,
   each with the ``epoch``. Only the newest pointer move waits. Taps close together are a double (or triple) click.
+  Typing and scrolling that arrive faster than the page takes them are merged while they wait (consecutive ``text``
+  into one insert, consecutive ``scroll`` into one wheel turn), and input that can't be queued is answered with an
+  ``error``, never dropped silently.
+- ``pong`` answers ``ping`` (any message counts): a phone that goes silent while frames go out is gone, and its
+  stream ends (a half-open socket otherwise lingers until the server's own keepalive, 30 s or more).
+
+Watching never changes which tab the bot's Chrome shows: a background tab is shown with stills. Only while the person
+holds the browser is the tab they work in brought to the front (the tab that was in front comes back when they hand
+it back). Following the bot means following the tab it brings forward, or the one it opens or loads a page in.
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
+import urllib.request
+from collections import deque
 
 PROTOCOL = 3
 IN_FLIGHT = 2
@@ -42,6 +54,12 @@ PING_EVERY = 10.0
 CLAIM_SECONDS = 120.0
 QUIET_CHECK = 3.0  # seconds without a frame before checking that Chrome still answers
 STILL_AFTER = 1.5        # no screencast frame for this long: send a still instead
+STILL_HIDDEN = 0.5       # a background tab (Chrome paints only its front tab) is shown by stills this often
+FOLLOW_SETTLE = 2.0      # after the view moves to another tab, another tab's new address waits this long to take it
+PHONE_SILENT = 12.0      # frames went out and the phone said nothing for this long: it is gone (a half-open socket)
+MAX_INBOX = 256          # phone input waiting for the page; merged typing and scrolling take one slot a burst
+MAX_TEXT = 4096
+MAX_WHEEL = 4000
 GRACE = 2.0              # a request waits at least this long for the bots' pause promises (agents publish each second)   # a held browser stays held this long after its viewer drops (switching apps for a code)
 RENEW_EVERY = 5.0
 # (longest side cap, JPEG quality), slow to sharp
@@ -161,7 +179,14 @@ class Viewer:
         self.page = (0.0, 0.0)  # CSS viewport the last frame showed
         self.claim = None       # this viewer's control file contents, while it asks for or holds the browser
         self.sent_state = None
-        self.inbox: asyncio.Queue = asyncio.Queue(maxsize=64)
+        self.inbox: deque = deque()  # phone input waiting for the page (see _queue)
+        self.inbox_ready = asyncio.Event()
+        self.overflowed = False  # input was refused for a full inbox: the phone is told
+        self.heard_at = time.monotonic()  # when the phone last said anything
+        self.hidden = False     # the watched tab isn't Chrome's front tab (stills, not screencast frames)
+        self.seen_front = False  # the watched tab was the front tab since it was attached
+        self.switched_at = 0.0  # when following last moved the view to another tab
+        self.fronted = None     # (the tab brought forward for the person, the tab that was in front before) while held
         self.next_move = None   # the newest pointer move not yet sent to the page
         self.framed_at = 0.0    # when a frame last went to the phone
         self.stilled_at = 0.0   # when a fallback still was last taken
@@ -170,6 +195,7 @@ class Viewer:
         self.at = None          # where the page's pointer is (CSS px)
         self.field = {"under": None, "focus": None}  # text fields for the phone's keyboard (PROBE), while held
         self.last_click = (0.0, 0.0, 0.0, 0)  # (time, x, y, count): taps close together are a double click
+        self.superseded = False  # the same phone opened a newer stream: this one ends quietly
 
     # Chrome events (called from the CDP reader)
     def on_event(self, method, params, session_id):
@@ -183,13 +209,13 @@ class Viewer:
         info = params.get("targetInfo") or {}
         if method == "Target.targetCreated" and info.get("type") == "page":
             self._upsert(info)
-            if self.follow and not self._holding() and not blank(info.get("url")):
-                self.tab = str(info.get("targetId"))  # an empty new tab is followed once it opens a page
+            if not blank(info.get("url")):
+                self._follow_to(str(info.get("targetId")))  # an empty new tab is followed once it opens a page
         elif method == "Target.targetInfoChanged" and info.get("type") == "page":
             before = next((t for t in self.tabs if t["id"] == info.get("targetId")), None)
             self._upsert(info)
-            if self.follow and not self._holding() and before is not None and before["url"] != info.get("url"):
-                self.tab = str(info.get("targetId"))
+            if before is not None and before["url"] != info.get("url"):
+                self._follow_to(str(info.get("targetId")))
         elif method == "Target.targetDestroyed":
             gone = params.get("targetId")
             self.tabs = [t for t in self.tabs if t["id"] != gone]
@@ -205,6 +231,16 @@ class Viewer:
         else:
             return
         self.wake.set()
+
+    def _follow_to(self, tab: str):
+        """Following the bot, the view moves to a tab it opened or loaded a page in, but not again within
+        FOLLOW_SETTLE: two subagents taking turns in two tabs would otherwise flip the view back and forth."""
+        if not self.follow or self.tab is None or tab == self.tab or self._holding():
+            return  # (no tab yet: discovery replaying the open tabs; run() picks the first one)
+        now = time.monotonic()
+        if self.switched_at and now - self.switched_at < FOLLOW_SETTLE:
+            return
+        self.tab, self.switched_at = tab, now
 
     def _upsert(self, info):
         tab = self.cdp_module.page_tabs([info])
@@ -294,6 +330,7 @@ class Viewer:
     # Phone messages
     def on_phone(self, message: dict):
         kind = message.get("type")
+        self.heard_at = time.monotonic()
         if kind == "ack":
             sent = self.in_flight.pop(message.get("seq"), None)
             if sent is not None:
@@ -304,7 +341,10 @@ class Viewer:
             width, height, scale = message.get("width"), message.get("height"), message.get("scale", 1)
             if (isinstance(width, int) and isinstance(height, int) and 0 < width <= 4096 and 0 < height <= 4096
                     and isinstance(scale, (int, float)) and 1 <= scale <= 3):
-                if (width, height, scale) != self.css:
+                # A shorter stage at the same width (the keyboard, a banner) keeps the frames it has: restarting the
+                # screencast for it would drop a frame just as the person starts typing.
+                shorter = (width, float(scale)) == (self.css[0], self.css[2]) and height <= self.css[1]
+                if (width, height, scale) != self.css and not shorter:
                     self.css = (width, height, float(scale))
                     self.view = (round(width * scale), round(height * scale))
                     self.restart_at = time.monotonic()
@@ -318,17 +358,37 @@ class Viewer:
         elif kind == "move":
             fresh = self.next_move is None
             self.next_move = message  # a pointer only needs its newest position
-            if fresh:
-                try:
-                    self.inbox.put_nowait({"type": "move"})
-                except asyncio.QueueFull:
-                    self.next_move = None
+            if fresh and not self._queue({"type": "move"}, report=False):
+                self.next_move = None
         elif kind in ("take", "give", "tap", "down", "up", "scroll", "text", "key", "go", "nav", "copy", "select_all"):
-            try:
-                self.inbox.put_nowait(message)
-            except asyncio.QueueFull:
-                pass
+            self._queue(message)
         self.wake.set()
+
+    def _queue(self, message: dict, report: bool = True) -> bool:
+        """Queue phone input for the page. Typing that waits is merged into the text before it (one insert for the
+        burst) and scrolling into the wheel turn before it, so a busy page that takes 30 ms an event keeps up with 25
+        characters a second and a fling ends when the fingers lift. Input that doesn't fit is reported, not lost."""
+        last = self.inbox[-1] if self.inbox else None
+        kind = message.get("type")
+        if last is not None and last.get("type") == kind and last.get("epoch") == message.get("epoch"):
+            if kind == "text" and isinstance(last.get("text"), str) and isinstance(message.get("text"), str) \
+                    and message["text"] and len(last["text"]) + len(message["text"]) <= MAX_TEXT:
+                self.inbox[-1] = {**last, "text": last["text"] + message["text"]}
+                return True
+            numbers = all(isinstance(m.get(k, 0), (int, float)) and not isinstance(m.get(k, 0), bool)
+                          for m in (last, message) for k in ("dy", "dx"))
+            if kind == "scroll" and numbers:
+                dy, dx = last.get("dy", 0) + message.get("dy", 0), last.get("dx", 0) + message.get("dx", 0)
+                if abs(dy) <= MAX_WHEEL and abs(dx) <= MAX_WHEEL:
+                    self.inbox[-1] = {**message, "dy": dy, "dx": dx}  # the newest point, the whole distance
+                    return True
+        if len(self.inbox) >= MAX_INBOX:
+            if report:
+                self.overflowed = True
+            return False
+        self.inbox.append(message)
+        self.inbox_ready.set()
+        return True
 
     async def _act(self, message: dict):
         kind = message.get("type")
@@ -411,10 +471,15 @@ class Viewer:
             found = await self._probe("selection")
             text = found.get("text") if isinstance(found, dict) else None
             await self.send_text({"type": "copied", "text": text[:65536] if isinstance(text, str) else ""})
+        typing_on = any(m.get("type") in ("text", "key") for m in self.inbox)
         if kind == "move":
             await self._sense(under=True)
-        elif kind in ("tap", "up", "key", "text", "go", "nav", "select_all"):
+        elif kind in ("tap", "up", "go", "nav", "select_all"):
             await self._sense(under=kind in ("tap", "up"), focus=True)
+        elif kind == "key" and message.get("key") in ("Enter", "Tab", "Escape") and not typing_on:
+            await self._sense(focus=True)  # these can move the page's focus; asked once the typing stops
+        elif kind == "text" and not typing_on and self.field["focus"] is None:
+            await self._sense(focus=True, settle=False)  # typing doesn't move the focus: asked only when unknown
         self.wake.set()
 
     async def _probe(self, mode: str, at=None):
@@ -523,12 +588,12 @@ class Viewer:
         result = await self.cdp.call("Target.attachToTarget", {"targetId": target, "flatten": True})
         self.session = result["sessionId"]
         self.params = self._params()
-        # Chrome paints only its front tab: a bot tab opened in the background sends no screencast frames.
-        # Bringing it forward happens inside the bot's own browser.
-        try:
-            await self.cdp.call("Page.bringToFront", {}, self.session, timeout=3)
-        except Exception:  # noqa: BLE001
-            pass
+        self.hidden, self.seen_front = False, False
+        # Chrome paints only its front tab: a background tab sends no screencast frames and is shown with stills.
+        # Watching never brings a tab forward (that would hide the tab the bot or a subagent works in, and a hidden
+        # tab gets no animation frames, so its page stalls). The person's tab comes forward while they hold it.
+        if self._holding():
+            await self._bring_forward(target)
         # One still first: a page that isn't changing sends no screencast frames.
         try:
             metrics = await self.cdp.call("Page.getLayoutMetrics", session=self.session, timeout=3)
@@ -541,6 +606,55 @@ class Viewer:
             pass
         await self.cdp.call("Page.startScreencast", self.params, self.session)
         self.wake.set()
+
+    async def _bring_forward(self, target):
+        """Show the person's tab while they hold the browser, remembering the tab that was in front."""
+        before = self.fronted[1] if self.fronted else await self._front_tab()
+        try:
+            await self.cdp.call("Page.bringToFront", {}, self.session, timeout=3)
+            self.fronted = (target, before)
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _restore_front(self):
+        """The person handed the browser back: the tab that was in front before comes back to the front."""
+        fronted, self.fronted = self.fronted, None
+        if not fronted or not fronted[1] or fronted[1] == fronted[0] or not any(t["id"] == fronted[1] for t in self.tabs):
+            return
+        try:
+            await self.cdp.call("Target.activateTarget", {"targetId": fronted[1]}, timeout=3)
+        except Exception:  # noqa: BLE001 - closed meanwhile
+            pass
+
+    async def _front_tab(self):
+        """The tab in front of the bot's Chrome: Chrome lists its tabs most recently activated first."""
+        found = re.match(r"^ws://((?:127\.0\.0\.1|localhost|\[::1\]):\d{1,5})/devtools/browser/", self.record.get("endpoint") or "")
+        if not found:
+            return None
+        try:
+            listing = await asyncio.to_thread(_get_json, f"http://{found.group(1)}/json/list")
+        except Exception:  # noqa: BLE001
+            return None
+        tabs = self.cdp_module.page_tabs([{**t, "targetId": t.get("id")} for t in listing if isinstance(t, dict)])
+        return tabs[0]["id"] if tabs else None
+
+    async def _check_front(self):
+        """Whether the watched tab is in front. Following the bot, a tab it moved away from (a Browser Use tab
+        switch) hands the view to the tab it brought forward."""
+        try:
+            found = await self.cdp.call("Runtime.evaluate", {"expression": "document.visibilityState", "returnByValue": True},
+                                        self.session, timeout=2)
+        except Exception:  # noqa: BLE001 - mid-navigation; asked again next second
+            return
+        self.hidden = (found.get("result") or {}).get("value") == "hidden"
+        if not self.hidden:
+            self.seen_front = True
+            return
+        if self.seen_front and self.follow and not self._holding():
+            self.seen_front = False
+            front = await self._front_tab()
+            if front and front != self.tab and any(t["id"] == front for t in self.tabs):
+                self.tab, self.switched_at = front, time.monotonic()
 
     async def _still(self):
         try:
@@ -651,12 +765,26 @@ class Viewer:
                         await refreshed
                     self.ended = self.ended or self._still_open()
                     self._advance_claim()
+                    holding = self._holding()
+                    if holding and self.session and (not self.fronted or self.fronted[0] != self.attached):
+                        await self._bring_forward(self.attached)  # control just came to this person
+                    elif not holding and self.fronted:
+                        await self._restore_front()
+                    if self.session and not holding:
+                        await self._check_front()
                     if self.claim is not None and self._state()["field"] is not None:
                         await self._sense(focus=True, settle=False)  # the page moves its focus by itself too
                     self.changed = True  # control files and asks change outside this socket
                 if self.ended:
                     await self.send_text({"type": "ended", "reason": self.ended})
                     return
+                if self.superseded:
+                    return  # the same phone came back on a new socket: this one is a husk
+                if self.seq and self.framed_at - self.heard_at > PHONE_SILENT:
+                    return  # frames kept going out and nothing came back: a half-open socket, not a phone
+                if self.overflowed:
+                    self.overflowed = False
+                    await self.send_text({"type": "error", "message": "Some of your input didn't reach the page. Check it and try again."})
                 if self.claim is not None and now - renewed >= RENEW_EVERY:
                     renewed = now
                     current = self._control()
@@ -686,8 +814,9 @@ class Viewer:
                     if state != self.sent_state:
                         self.sent_state = state
                         await self.send_text(state)
+                still_after = STILL_HIDDEN if self.hidden else STILL_AFTER
                 if (self.session and self.pending is None and not self.in_flight
-                        and now - self.framed_at > STILL_AFTER and now - self.stilled_at > STILL_AFTER):
+                        and now - self.framed_at > still_after and now - self.stilled_at > still_after):
                     # Chrome sent nothing for a while (a page it isn't painting): a still keeps the view honest.
                     self.stilled_at = now
                     await self._still()
@@ -708,11 +837,19 @@ class Viewer:
             await self._lift()
             if self.ended:  # nothing left to hold
                 self._release()
+            if self.fronted and not self._holding():
+                try:
+                    await self._restore_front()
+                except Exception:  # noqa: BLE001
+                    pass
             await self.cdp.close()
 
     async def _run_actions(self):
         while True:
-            message = await self.inbox.get()
+            while not self.inbox:
+                self.inbox_ready.clear()
+                await self.inbox_ready.wait()
+            message = self.inbox.popleft()
             try:
                 await self._act(message)
             except Exception:  # noqa: BLE001 - one failed input never ends the stream
@@ -734,6 +871,12 @@ class Viewer:
                 continue
             if isinstance(message, dict):
                 self.on_phone(message)
+
+
+def _get_json(url: str):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(url, timeout=2) as response:  # noqa: S310 - loopback only
+        return json.loads(response.read(4 * 1024 * 1024))
 
 
 async def tabs(module, endpoint: str) -> list[dict]:

@@ -56,8 +56,13 @@ MAX_BACKOFF = 300.0
 # AppKit's key handling, waiting on the window server); a fresh one types fine. So a bot's Chrome is started afresh
 # once it is this old, or older than the Chrome installed on disk, but only while nobody uses it (tabs.py brings its
 # pages back; sign-ins live in the profile).
+# Refreshes are spread out (REFRESH_SPACING apart: a burst of ten Chrome launches inside the gateway's process slowed
+# its chats), a bot must have left its browser alone REFRESH_IDLE first (a bot in a long turn may come back to it), and
+# a Chrome nobody has used since the dashboard started waits REFRESH_UNUSED (restarting it hourly bought nothing).
 REFRESH_AGE = 3600.0
-REFRESH_IDLE = 600.0
+REFRESH_IDLE = 1200.0
+REFRESH_UNUSED = 4 * 3600.0
+REFRESH_SPACING = 180.0
 WINDOW = "1280,800"
 LOCAL = re.compile(r"^(?:http|ws)://(?:127\.0\.0\.1|localhost|\[::1\]):(\d{2,5})/?$")
 LOOPBACK_FIXED = re.compile(r"^ws://(?:127\.0\.0\.1|localhost|\[::1\]):\d+/devtools/browser/")  # one browser, by id
@@ -665,6 +670,7 @@ class Supervisor:
         self.thread = None
         self.lock = None
         self.idle_for = None  # profile -> seconds nobody has used its browser (0 while in use); set by the dashboard
+        self.refreshed_at = 0.0  # when a Chrome was last started afresh (one at a time, REFRESH_SPACING apart)
 
     def pass_once(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
@@ -771,6 +777,8 @@ class Supervisor:
             age = now - psutil.Process(pid).create_time()
         except Exception:  # noqa: BLE001
             return False
+        if now - self.refreshed_at < REFRESH_SPACING:
+            return False  # one at a time, spread out
         outdated = installed_version() not in (None, running_version(port))
         if age < REFRESH_AGE and not outdated:
             return False
@@ -778,8 +786,9 @@ class Supervisor:
             idle = self.idle_for(profile)
         except Exception:  # noqa: BLE001
             return False
-        if idle < REFRESH_IDLE:
+        if idle < REFRESH_IDLE or (idle == float("inf") and age < REFRESH_UNUSED and not outdated):
             return False
+        self.refreshed_at = now
         log.info("hermes-hq-browser: starting %s's Chrome afresh (%s, %s)", profile,
                  "a newer Chrome is installed" if outdated else f"running {age / 3600:.1f} h",
                  "never used since the dashboard started" if idle == float("inf") else f"unused for {idle / 60:.0f} min")
